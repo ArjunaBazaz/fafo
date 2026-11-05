@@ -1,3 +1,4 @@
+use super::AccessPolicy;
 use super::{error::DBError, exector_database::ExectorDatabase};
 use crate::{
     access_set::{extract_short_hash, will_read_address, CrwSets},
@@ -18,6 +19,7 @@ pub struct ExecutorProxy<'a, DB: ExectorDatabase> {
     db: DB,
     pub orig_acc_map: &'a mut HashMap<Address, Option<AccountInfo>>,
     crw_sets: &'a CrwSets,
+    access_policy: AccessPolicy,
     pub orig_slot_dust_map: HashMap<Hash32, Option<u128>>,
 }
 
@@ -28,11 +30,28 @@ impl<'a, DB: ExectorDatabase> ExecutorProxy<'a, DB> {
         orig_acc_map: &'a mut HashMap<Address, Option<AccountInfo>>,
         crw_sets: &'a CrwSets,
     ) -> Self {
+        Self::with_access_policy(
+            tx,
+            db,
+            orig_acc_map,
+            crw_sets,
+            AccessPolicy::EnforcePredicted,
+        )
+    }
+
+    pub fn with_access_policy(
+        tx: &'a TxEnv,
+        db: DB,
+        orig_acc_map: &'a mut HashMap<Address, Option<AccountInfo>>,
+        crw_sets: &'a CrwSets,
+        access_policy: AccessPolicy,
+    ) -> Self {
         Self {
             tx,
             db,
             orig_acc_map,
             crw_sets,
+            access_policy,
             orig_slot_dust_map: HashMap::new(),
         }
     }
@@ -48,7 +67,9 @@ impl<DB: ExectorDatabase> Database for ExecutorProxy<'_, DB> {
 
         let key_hash = hasher::hash(&address[..]);
         let short_hash = extract_short_hash(&key_hash[..]);
-        if !(will_read_address(self.tx, &address) || self.crw_sets.has_read_access(&short_hash)) {
+        if self.access_policy == AccessPolicy::EnforcePredicted
+            && !(will_read_address(self.tx, &address) || self.crw_sets.has_read_access(&short_hash))
+        {
             return Err(DBError::AccountNotIncluded(address));
         }
 
@@ -66,7 +87,9 @@ impl<DB: ExectorDatabase> Database for ExecutorProxy<'_, DB> {
         let k: [u8; 52] = join_address_index(&address, &index);
         let key_hash = hasher::hash(k);
         let short_hash = extract_short_hash(&key_hash[..]);
-        if !self.crw_sets.has_read_access(&short_hash) {
+        if self.access_policy == AccessPolicy::EnforcePredicted
+            && !self.crw_sets.has_read_access(&short_hash)
+        {
             return Err(DBError::SlotNotIncluded {
                 addr: address,
                 index,

@@ -855,6 +855,7 @@ dependencies = [
  "exepipe-common",
  "hpfile",
  "indicatif",
+ "libc",
  "log",
  "metrics",
  "metrics-util",

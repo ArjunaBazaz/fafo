@@ -150,6 +150,7 @@ impl<T: ADS> BlockContext<T> {
             let tx_ctx = TxContext::new(self);
             let x = tx.crw_sets.as_ref().unwrap();
             let (tx_result, mut result) = execute_tx(tx_ctx, &self.blk.env, &tx.env, x);
+            crate::execution_stats::record(&tx_result);
 
             task_result.push(tx_result);
             if let Some((change_set, _, _, created_codes_map, _, _)) = result.take() {

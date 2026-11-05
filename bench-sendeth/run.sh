@@ -24,6 +24,7 @@ set -euo pipefail
 show_help() {
   cat <<EOF
 Usage: $0 [--db-dir DIR] [--size fast|medium|full|BITS] [--token eth|token]
+          [--executor fafo|occ] [--scheduler-threads N] [--cpu-cores N] [--occ-window N]
           [--generator simple|static|hotn|none|replay] [--contention-degree X]
           [--skew Y] [--txns-json PATH] [--txn-filter STR]
 
@@ -44,6 +45,10 @@ EOF
 DB_DIR="/tmp/QMDB"
 SIZE="medium"           # fast | medium | full | <bits>
 TOKEN="eth"             # eth | token
+EXECUTOR="fafo"
+SCHEDULER_THREADS="102"
+CPU_CORES=""
+OCC_WINDOW="128"
 GENERATOR="none"      # simple | static | hotn | none | replay
 CONTENTION_DEGREE="0.1"
 SKEW="0.00001"
@@ -57,6 +62,10 @@ while [[ $# -gt 0 ]]; do
     --db-dir) DB_DIR="$2"; shift 2 ;;
     --size)   SIZE="$2"; shift 2 ;;
     --token)  TOKEN="$2"; shift 2 ;;
+    --executor) EXECUTOR="$2"; shift 2 ;;
+    --scheduler-threads) SCHEDULER_THREADS="$2"; shift 2 ;;
+    --cpu-cores) CPU_CORES="$2"; shift 2 ;;
+    --occ-window) OCC_WINDOW="$2"; shift 2 ;;
     --generator) GENERATOR="$2"; shift 2 ;;
     --contention-degree) CONTENTION_DEGREE="$2"; shift 2 ;;
     --skew)   SKEW="$2"; HOTN="$2"; shift 2 ;;
@@ -66,6 +75,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown flag: $1" >&2; show_help ;;
   esac
 done
+
+case "$EXECUTOR" in
+  fafo|occ) ;;
+  *) echo "Invalid --executor '$EXECUTOR' (expected fafo or occ)" >&2; exit 1 ;;
+esac
 
 # Map SIZE -> ENTRY_COUNT_BITS
 if [[ "$SIZE" =~ ^[0-9]+$ ]]; then
@@ -109,6 +123,10 @@ Parameters
 ----------
 DB_DIR              : $DB_DIR
 TOKEN               : $TOKEN
+EXECUTOR            : $EXECUTOR
+SCHEDULER_THREADS   : $SCHEDULER_THREADS
+CPU_CORES           : ${CPU_CORES:-inherited affinity}
+OCC_WINDOW          : $OCC_WINDOW
 ENTRY_COUNT_BITS    : $ENTRY_COUNT_BITS
 GENERATOR           : $GENERATOR
 CONTENTION_DEGREE   : $CONTENTION_DEGREE
@@ -151,7 +169,13 @@ CMD_PREFIX=(cargo run --quiet --package bench-sendeth --bin bench-sendeth --rele
             --db-dir "$DB_DIR" \
             --entry-count-bits "$ENTRY_COUNT_BITS" \
             --create-txn-per-block-bits "$CREATE_TXN_PER_BLOCK_BITS" \
-            --workload "$TOKEN")
+            --workload "$TOKEN" \
+            --executor "$EXECUTOR" \
+            --scheduler-threads "$SCHEDULER_THREADS" \
+            --occ-window "$OCC_WINDOW")
+if [[ -n "$CPU_CORES" ]]; then
+  CMD_PREFIX+=(--cpu-cores "$CPU_CORES")
+fi
 
 # 1. init-db (lazy)
 if [[ ! -d "$RUN_DIR/data" ]]; then

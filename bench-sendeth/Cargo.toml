@@ -30,6 +30,7 @@ chrono = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = { workspace = true }
+libc = { workspace = true }
 
 [target.'cfg(not(target_os = "zkvm"))'.dependencies]
 tick_counter = { workspace = true }

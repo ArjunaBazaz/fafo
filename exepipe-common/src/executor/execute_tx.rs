@@ -12,25 +12,38 @@ use revm::state::Bytecode;
 
 use super::error::{DBError, ExecutionError};
 use super::exector_database::ExectorDatabase;
-use super::get_change_set::{get_change_set, ChangeSetConfig};
-use super::ExecutorProxy;
+use super::get_change_set::{get_change_set_with_policy, ChangeSetConfig};
+use super::{AccessPolicy, ExecutorProxy};
+
+/// A private execution result. Publishing it is the caller's responsibility.
+pub type ExecutionOutput = (
+    Result<ResultAndState, ExecutionError>,
+    Option<(
+        ChangeSet,
+        u128,
+        u64,
+        HashMap<Address, Bytecode>,
+        Vec<Hash32>,
+        Vec<Hash32>,
+    )>,
+);
 
 pub fn execute_tx<DB: ExectorDatabase>(
+    db: DB,
+    blk_env: &BlockEnv,
+    tx: &TxEnv,
+    crw_sets: &CrwSets,
+) -> ExecutionOutput {
+    execute_tx_with_policy(db, blk_env, tx, crw_sets, AccessPolicy::EnforcePredicted)
+}
+
+pub fn execute_tx_with_policy<DB: ExectorDatabase>(
     mut db: DB,
     blk_env: &BlockEnv,
     tx: &TxEnv,
     crw_sets: &CrwSets,
-) -> (
-    Result<ResultAndState, ExecutionError>,
-    Option<(
-        ChangeSet,
-        u128,                       // deletion_reward
-        u64,                        // total_gas_used
-        HashMap<Address, Bytecode>, // created_codes_map
-        Vec<Hash32>,                // touched_kh_list
-        Vec<Hash32>,                // exclusion_kh_list>,
-    )>,
-) {
+    access_policy: AccessPolicy,
+) -> ExecutionOutput {
     let caller = tx.caller;
     let caller_info = match db.basic(&caller) {
         Some(info) => info,
@@ -56,7 +69,7 @@ pub fn execute_tx<DB: ExectorDatabase>(
     };
     orig_acc_map.insert(caller, Some(caller_info));
 
-    let db = ExecutorProxy::new(tx, db, &mut orig_acc_map, crw_sets);
+    let db = ExecutorProxy::with_access_policy(tx, db, &mut orig_acc_map, crw_sets, access_policy);
 
     let (mut evm, evm_result) = run_tx(&blk_env, &tx, db);
     if let Err(err) = evm_result {
@@ -66,7 +79,9 @@ pub fn execute_tx<DB: ExectorDatabase>(
                 | EVMError::Database(DBError::SlotNotIncluded { .. })
         );
 
-        if need_drop {
+        // OCC must return speculative failures for validation as well. The
+        // legacy FAFO error handler is unimplemented; preserve its behavior.
+        if need_drop || access_policy == AccessPolicy::Unrestricted {
             return (Err(ExecutionError::EVMError(err)), None);
         }
 
@@ -90,16 +105,19 @@ pub fn execute_tx<DB: ExectorDatabase>(
 
     // we must check not writing the readonly account and slot.
     let db = evm.db();
-    let get_cs_result = get_change_set(ChangeSetConfig {
-        caller: &tx.caller,
-        to_addr_access: get_to_addr_access(tx),
-        gas_price: coinbase_gas_price,
-        remained_gas_limit: tx.gas_limit - gas_used,
-        state: &res_and_state.state,
-        orig_acc_map: db.orig_acc_map,
-        orig_slot_dust_map: &db.orig_slot_dust_map,
-        crw_sets,
-    });
+    let get_cs_result = get_change_set_with_policy(
+        ChangeSetConfig {
+            caller: &tx.caller,
+            to_addr_access: get_to_addr_access(tx),
+            gas_price: coinbase_gas_price,
+            remained_gas_limit: tx.gas_limit - gas_used,
+            state: &res_and_state.state,
+            orig_acc_map: db.orig_acc_map,
+            orig_slot_dust_map: &db.orig_slot_dust_map,
+            crw_sets,
+        },
+        access_policy,
+    );
 
     if let Err(err) = get_cs_result {
         return (Err(err), None);

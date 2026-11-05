@@ -10,8 +10,8 @@ pub const GROUP_SIZE_BITS: usize = 4;
 // THREAD_COUNT is only used in commented code
 // pub const THREAD_COUNT: usize = 64;
 
-// Each txn is stored as 2x 6-bytes in blocks.dat
-pub const BYTES_PER_TXN: usize = 6 * 2;
+// Sender ID/offset and recipient ID/offset: four 6-byte fields.
+pub const BYTES_PER_TXN: usize = 6 * 4;
 
 // adddress is created by test_deploy_erc20
 pub const CA_ADDR: Address = address!("0x31256cb3d8cb35671f13b5b1680b2cf4fe55fc4f");
@@ -88,7 +88,7 @@ impl TokenSetup {
             count_in_block: count_in_block,
             create_block_count,
             entry_count: count_in_block as u64 * create_block_count as u64,
-            bytes_in_vec: count_in_block as usize * BYTES_PER_TXN,
+            bytes_in_vec: txn_per_transfer_block * BYTES_PER_TXN,
             group_size: group_size as u64,
             transfer_txn_count,
             transfer_block_count,

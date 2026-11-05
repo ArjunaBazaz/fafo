@@ -2,18 +2,17 @@
 use super::cli;
 use super::def::erc_address_storage;
 use super::def::{CA_ADDR, ERC20_HEX};
+use super::execution::BenchmarkExecutor;
 
-use super::def::TokenSetup;
+use super::def::{TokenSetup, BYTES_PER_TXN};
 use exepipe::test_helper::encode_ec20_transfer_data;
 use exepipe::{
     exetask::{ExeTask, Tx},
-    Block, ExePipe,
+    Block,
 };
 use exepipe_common::access_set::{extract_short_hash, CrwSets};
-use exepipe_common::statecache::StateCache;
 use exepipe_common::utils::join_address_index;
 use log::{debug, info};
-use qmdb::entryfile::EntryCache;
 use qmdb::utils::hasher;
 use qmdb::AdsWrap;
 use revm::context::{BlockEnv, TxEnv};
@@ -27,7 +26,7 @@ use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-const TX_IN_TASK: usize = 4;
+use exepipe::dispatcher::def::TX_IN_TASK;
 
 fn extract_tx_info(bz: &[u8], pos: usize) -> [u64; 4] {
     let mut res = [0u64; 4];
@@ -40,31 +39,21 @@ fn extract_tx_info(bz: &[u8], pos: usize) -> [u64; 4] {
     res
 }
 
-const BYTES_PER_TXN: usize = 24;
-
 #[inline(always)]
 fn executor_loop(
     task_receiver: Receiver<(Vec<Vec<Box<Tx>>>, Block)>,
     done_sender: SyncSender<bool>,
-    pipe: &mut ExePipe,
-    start_height: i64,
+    pipe: &mut BenchmarkExecutor,
     pb: &ProgressBar,
 ) {
-    let mut _height = start_height;
-    // let start = Instant::now();
-    let mut pre_state_cache = Arc::new(StateCache::new());
     loop {
         match task_receiver.recv() {
             Err(_) => {
                 break;
             }
             Ok((task_in, blk)) => {
-                _height += 1;
                 pb.inc(1);
-                // debug!("Got Height={} Elapse={:?}", height, start.elapsed());
-                pre_state_cache = pipe.run_block_with_sim(task_in, blk, pre_state_cache);
-                //pipe.run_block(task_in, blk, pre_state_cache);
-                //info!("Done Height={} Elapse={:?}", height, start.elapsed());
+                pipe.run_block(task_in, blk);
             }
         };
     }
@@ -86,7 +75,7 @@ fn prepare_txn(
     // Read data out of blocks.dat
     let mut v = Vec::with_capacity(token_setup.bytes_in_vec);
     v.resize(token_setup.bytes_in_vec, 0u8);
-    match blk_file.read_at(&mut v[..], *file_pos) {
+    match blk_file.read_exact_at(&mut v[..], *file_pos) {
         Ok(_) => {
             *file_pos += token_setup.bytes_in_vec as u64;
         }
@@ -164,6 +153,9 @@ fn prepare_txn(
             task_in.push(v);
         }
     }
+    if !tx_vec.is_empty() {
+        task_in.push(tx_vec);
+    }
     true
 }
 
@@ -179,7 +171,7 @@ pub fn parallel_transfer(
     let start_height = ads.get_metadb().read().get_curr_height();
     debug!("start_height={}", start_height);
 
-    let mut pipe = ExePipe::new(ads, dir);
+    let mut pipe = BenchmarkExecutor::new(ads, dir, args);
 
     let blk_file = File::options()
         .read(true)
@@ -225,21 +217,14 @@ pub fn parallel_transfer(
     // 2. Spawn a thread for pipeline (pre_state_cache?)
     let (task_sender, task_receiver) = sync_channel(4);
     let (done_sender, done_receiver) = sync_channel(1);
-    std::thread::spawn(move || {
-        executor_loop(
-            task_receiver,
-            done_sender,
-            &mut pipe,
-            start_height,
-            &pb_exec,
-        )
-    });
+    let executor_thread =
+        std::thread::spawn(move || executor_loop(task_receiver, done_sender, &mut pipe, &pb_exec));
 
     // 3. Main loop of benchmark
     let start = Instant::now();
+    let mut submitted = 0usize;
     let mut should_break = false;
     for _ in 0..token_setup.transfer_block_count {
-        let _cache = Arc::new(EntryCache::new());
         let mut task_in = Vec::with_capacity(token_setup.txn_per_transfer_block);
         std::thread::scope(|_s| {
             if !prepare_txn(
@@ -277,13 +262,19 @@ pub fn parallel_transfer(
         //     task_in.len()
         // );
         pb_generate.inc(1);
+        submitted += task_in.iter().map(Vec::len).sum::<usize>();
         task_sender.send((task_in, blk)).unwrap();
     }
     pb_generate.finish_with_message("Finished generating blocks");
     drop(task_sender);
     done_receiver.recv().unwrap();
+    executor_thread.join().expect("executor thread panicked");
     mpb.clear().unwrap();
-    let txns_per_sec = token_setup.transfer_txn_count as f64 / start.elapsed().as_secs_f64();
+    assert_eq!(
+        submitted as u64, token_setup.transfer_txn_count,
+        "workload ended before all transactions were submitted"
+    );
+    let txns_per_sec = submitted as f64 / start.elapsed().as_secs_f64();
     info!(
         "Replayed {} transfers in {:?}, {:.1} txns/s",
         token_setup.transfer_txn_count,
@@ -291,4 +282,47 @@ pub fn parallel_transfer(
         txns_per_sec,
     );
     metrics::gauge!("bench-sendeth.replay.txns_per_sec").set(txns_per_sec);
+    metrics::gauge!("bench-sendeth.replay.submitted_txns").set(submitted as f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn workload_reader_keeps_partial_groups_and_detects_short_blocks() {
+        let setup = TokenSetup::new("eth".into(), 6, 6, 4, 10, 5, true);
+        assert_eq!(setup.bytes_in_vec, 5 * BYTES_PER_TXN);
+        let mut file = tempfile::tempfile().unwrap();
+        for _ in 0..10 {
+            for value in [100u64, 0, 101, 0] {
+                file.write_all(&value.to_le_bytes()[..6]).unwrap();
+            }
+        }
+        let mut pos = 0;
+        let mut height = 0;
+        for _ in 0..2 {
+            let mut groups = Vec::new();
+            assert!(prepare_txn(
+                &mut groups,
+                &setup,
+                &file,
+                &mut pos,
+                &mut height,
+                true
+            ));
+            assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![4, 1]);
+        }
+        let mut groups = Vec::new();
+        assert!(!prepare_txn(
+            &mut groups,
+            &setup,
+            &file,
+            &mut pos,
+            &mut height,
+            true
+        ));
+        assert!(groups.is_empty());
+    }
 }

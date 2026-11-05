@@ -34,6 +34,11 @@ Use `--help` to see all options exposed by `run.sh`:
 
 Common flags:
 
+* `--executor fafo|occ` selects execution (default `fafo`).
+* `--scheduler-threads N` sets the same total scheduler budget for either mode (default 102; minimum 39).
+* `--cpu-cores N` binds the entire process to the first N allowed logical CPUs on Linux.
+* `--occ-window N` sets OCC transactions in flight (default 128), independently of its thread budget.
+
 * `--db-dir DIR` – where to store QMDB files (default `/tmp/QMDB`).
 * `--size fast|medium|full|BITS` – workload size shortcut (18, 26, 30 bits) or
   an explicit power-of-two.
@@ -54,6 +59,67 @@ See the *Generators* section below for details.
 ./workloads/get_workloads.sh
 ./bench-sendeth/run.sh --size full --generator replay
 ```
+
+## Compare FAFO and OCC
+
+Run the same commands with only the executor changed:
+
+```bash
+./bench-sendeth/run.sh --size fast --generator hotn --contention-degree 0.1 --skew 100 --executor fafo --cpu-cores 8
+./bench-sendeth/run.sh --size fast --generator hotn --contention-degree 0.1 --skew 100 --executor occ --cpu-cores 8
+```
+
+The initialized reference database and workload file are shared. Each replay
+starts from a fresh copy in `<configuration>_run_fafo` or `_run_occ`, and metrics
+filenames contain the executor name so one mode does not overwrite the other.
+Both timers include transaction construction, all execution/retry work, and the
+final QMDB flush/Merkleization. Database copying and initial database opening are
+outside the TPS timer for both modes.
+
+The default **102-thread scheduler budget** includes:
+
+| Role | FAFO | OCC |
+|---|---:|---:|
+| Execution workers | 64 | 101 |
+| Simulation workers | 16 | 0 |
+| Warmup workers | 12 | 0 |
+| Scanner threads | 4 | 0 |
+| Simulator shard threads | 4 | 0 |
+| Framer | 1 | 0 |
+| Calling coordinator | 1 | 1 |
+| **Total** | **102** | **102** |
+
+For another shared budget, FAFO retains its 38 auxiliary/coordinator threads and
+uses `N - 38` execution workers; OCC uses `N - 1` workers plus its coordinator.
+FAFO's shard/framer threads are transient, so the count is a peak per-block
+budget. Both have identical additional QMDB/CodeDB workers, the same benchmark
+producer, allocator, database configuration, and CPU affinity. No unused FAFO
+executor is constructed in an OCC run. `--cpu-cores` counts logical CPUs, not
+physical cores; for exact placement launch both with the same `taskset` mask.
+Without that option both inherit the invoking process's CPU mask.
+
+OCC executes private snapshot attempts, validates actual reads, retries stale
+attempts, and commits in input order. It does not use predicted access sets for
+scheduling or validation. FAFO retains access prediction and reordering. Both
+receive the same benchmark transactions, including the existing supplied-access
+hint mix. OCC validates individual transactions; only persistence groups up to
+four finalized transactions into a QMDB task, matching FAFO's target task size
+(FAFO caller shards can also emit partial tasks).
+
+Common `execution.*` metrics distinguish finalized, successful, reverted, halted,
+and invalid transactions. TPS counts finalized input transactions, not just
+successful transfers. OCC additionally records attempts, validation failures,
+attempts per finalized transaction, and persistence tasks. FAFO retains framer
+metrics. Resource metadata records thread allocations, allowed CPU IDs, and the
+shared storage settings. Linux process metrics report peak RSS and CPU time for
+the process, including startup; they are not replay-only measurements.
+
+Equal resource availability does not imply identical memory consumption or CPU
+utilization. Algorithms retain different state. No RAM quota is imposed; apply
+the same container/cgroup memory limit to both processes if a hard limit is
+needed. These runs compare fixed-input-order OCC against FAFO's chosen order,
+not identical serial ordering under contention. The current shared EVM semantics
+(including disabled nonce checks and beneficiary rewards) apply to both.
 
 
 ## Anatomy of a benchmark run
