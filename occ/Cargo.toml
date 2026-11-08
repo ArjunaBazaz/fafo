@@ -1,0 +1,36 @@
+[package]
+name = "fafo-occ"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Isolated ordered optimistic concurrency control executor for QMDB"
+license = "MIT OR Apache-2.0"
+
+# A separate workspace keeps this crate out of FAFO's builds, dependency feature
+# resolution, and lockfile. Existing workspace manifests are intentionally intact.
+[workspace]
+resolver = "2"
+
+[dependencies]
+anyhow = "1.0.96"
+codedb = { path = "../codedb" }
+crossbeam = "0.8"
+exepipe = { path = "../exepipe" }
+exepipe-common = { path = "../exepipe-common" }
+parking_lot = "0.12.3"
+qmdb = { path = "../qmdb" }
+rayon = "1.10.0"
+revm = { version = "20.0.0", features = ["serde", "serde-json", "std", "alloydb"] }
+
+[dev-dependencies]
+serial_test = "3.2.0"
+tempfile = "3.17.1"
+
+[profile.release]
+codegen-units = 16
+debug = "line-tables-only"
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true
