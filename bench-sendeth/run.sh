@@ -24,6 +24,7 @@ set -euo pipefail
 show_help() {
   cat <<EOF
 Usage: $0 [--db-dir DIR] [--size fast|medium|full|BITS] [--token eth|token]
+          [--executor fafo|occ] (default: fafo)
           [--generator simple|static|hotn|none|replay] [--contention-degree X]
           [--skew Y] [--txns-json PATH] [--txn-filter STR]
 
@@ -44,6 +45,7 @@ EOF
 DB_DIR="/tmp/QMDB"
 SIZE="medium"           # fast | medium | full | <bits>
 TOKEN="eth"             # eth | token
+EXECUTOR=""             # omitted preserves the original FAFO command
 GENERATOR="none"      # simple | static | hotn | none | replay
 CONTENTION_DEGREE="0.1"
 SKEW="0.00001"
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --db-dir) DB_DIR="$2"; shift 2 ;;
     --size)   SIZE="$2"; shift 2 ;;
     --token)  TOKEN="$2"; shift 2 ;;
+    --executor) EXECUTOR="$2"; shift 2 ;;
     --generator) GENERATOR="$2"; shift 2 ;;
     --contention-degree) CONTENTION_DEGREE="$2"; shift 2 ;;
     --skew)   SKEW="$2"; HOTN="$2"; shift 2 ;;
@@ -66,6 +69,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown flag: $1" >&2; show_help ;;
   esac
 done
+
+case "$EXECUTOR" in
+  ""|fafo|occ) ;;
+  *) echo "Invalid --executor '$EXECUTOR': expected fafo or occ" >&2; exit 1 ;;
+esac
 
 # Map SIZE -> ENTRY_COUNT_BITS
 if [[ "$SIZE" =~ ^[0-9]+$ ]]; then
@@ -152,6 +160,9 @@ CMD_PREFIX=(cargo run --quiet --package bench-sendeth --bin bench-sendeth --rele
             --entry-count-bits "$ENTRY_COUNT_BITS" \
             --create-txn-per-block-bits "$CREATE_TXN_PER_BLOCK_BITS" \
             --workload "$TOKEN")
+if [[ -n "$EXECUTOR" ]]; then
+  CMD_PREFIX+=(--executor "$EXECUTOR")
+fi
 
 # 1. init-db (lazy)
 if [[ ! -d "$RUN_DIR/data" ]]; then

@@ -1,10 +1,10 @@
 # Isolated ordered OCC executor
 
 All OCC code lives in this directory. This is a **standalone Cargo workspace**,
-not a member of the repository's original workspace. No existing source file,
-manifest, lockfile, benchmark, or FAFO execution behavior needs to change to
-build and test it. In particular, the original FAFO cache handoff, scheduler,
-thread allocation, metrics, and workload reader are left untouched.
+not a member of the repository's original workspace. The benchmark now consumes
+it through a path dependency and a thin adapter in
+`bench-sendeth/src/common/occ_adapter.rs`. The original FAFO cache handoff,
+scheduler, thread allocation, metrics, and workload reader are left untouched.
 
 ## Build and test
 
@@ -16,20 +16,18 @@ cargo test --manifest-path occ/Cargo.toml
 cargo clippy --manifest-path occ/Cargo.toml --lib
 ```
 
-The original workspace commands still build the original packages. They do not
-build OCC or enable its dependencies/features. OCC has its own `Cargo.lock`.
+Benchmark builds include OCC; standalone OCC builds use its own `Cargo.lock`.
 Its release profile matches the original workspace's release settings.
 
-## Boundary for a future benchmark adapter
+## Benchmark adapter
 
-The benchmark is **not connected or modified** in this change. Later, its only
-new dependency would be:
+The benchmark selects `--executor fafo|occ` (default `fafo`) and uses this dependency:
 
 ```toml
 fafo-occ = { path = "../occ" }
 ```
 
-The adapter can reuse the existing `AdsWrap<ExeTask>`, `Vec<Vec<Box<Tx>>>`, `Block`,
+The adapter reuses the existing `AdsWrap<ExeTask>`, `Vec<Vec<Box<Tx>>>`, `Block`,
 and optional bytecode setup. It selects exactly one executor at construction:
 
 ```rust,ignore
@@ -44,18 +42,41 @@ for (task_in, block) in blocks {
 executor.flush()?; // wait for QMDB persistence/Merkleization before stopping timing
 ```
 
-The FAFO branch would continue calling the original `ExePipe::run_block_with_sim`
-and passing its original cache argument exactly as today. The OCC branch calls
+The FAFO branch continues calling the original `ExePipe::run_block_with_sim`
+and passing its original cache argument. The OCC branch calls
 `run_block` without a cache argument, because OCC owns its inter-block overlay.
-It must not instantiate an unused FAFO executor or call its simulator/framer.
+It does not instantiate an unused FAFO executor or call its simulator/framer.
 `Block.env.number` supplies OCC's block height; the current benchmark already
 sets it to the same height as the private block header. Heights must be consecutive.
 
-The adapter must share input preparation and timing boundaries, wait for the
-selected executor's final `flush`, and keep FAFO-only framer metrics conditional.
+The adapter shares input preparation and timing boundaries, waits for the
+selected executor's final `flush`, and keeps FAFO-only framer metrics conditional.
 OCC emits no global metrics and does not change the existing metric recorder.
 Its returned statistics count finalized transactions, attempts, validation
 failures, applied change sets, final errors, and QMDB persistence tasks.
+
+For the usual helper script, run the same command with either executor:
+
+```bash
+bash bench-sendeth/run.sh --size fast --token eth --executor fafo
+bash bench-sendeth/run.sh --size fast --token eth --executor occ
+```
+
+The direct Cargo command also accepts the flag before or after `replay-workload`:
+
+```bash
+cargo run --release -p bench-sendeth --bin bench-sendeth -- \
+  --workload eth --executor occ replay-workload \
+  --blocks-workload-filename /path/to/blocks.dat
+```
+
+Supply the same database directory and sizing flags used to initialize and
+prepare that workload. Both modes use the same reference database and workload
+file. FAFO retains its `_run` directory and default metric filenames; OCC uses
+`_run_occ` and an `occ_` metrics filename prefix to avoid overwriting FAFO runs.
+An explicit `--output` still selects the requested metrics file in either mode.
+OCC statistics use `occ.*`; common throughput/duration metrics keep their names.
+Final OCC executor errors fail the benchmark; EVM reverts remain normal results.
 
 The default allocation is 101 speculative workers plus the calling coordinator:
 102 scheduler threads, matching the original FAFO scheduler's peak total

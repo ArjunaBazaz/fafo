@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["occ"]
 resolver = "2"
 members = [
     "hpfile",

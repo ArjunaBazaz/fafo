@@ -7,8 +7,8 @@ publish = false
 description = "Isolated ordered optimistic concurrency control executor for QMDB"
 license = "MIT OR Apache-2.0"
 
-# A separate workspace keeps this crate out of FAFO's builds, dependency feature
-# resolution, and lockfile. Existing workspace manifests are intentionally intact.
+# Keep standalone OCC builds/tests available alongside the benchmark's path
+# dependency. The parent workspace explicitly excludes this nested workspace.
 [workspace]
 resolver = "2"
 

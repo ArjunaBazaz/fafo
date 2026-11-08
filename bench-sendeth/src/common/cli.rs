@@ -1,5 +1,18 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+
+#[derive(ValueEnum, Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Executor {
+    Fafo,
+    Occ,
+}
+
+impl Executor {
+    fn is_fafo(&self) -> bool {
+        *self == Self::Fafo
+    }
+}
 
 #[derive(Subcommand, Debug, Serialize, Clone)]
 pub enum Command {
@@ -37,6 +50,11 @@ pub struct BenchmarkCli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    /// Replay executor; omitted selects the original FAFO pipeline.
+    #[arg(long, value_enum, default_value = "fafo", global = true)]
+    #[serde(skip_serializing_if = "Executor::is_fafo")]
+    pub executor: Executor,
+
     /// Directory to store the database's persistent files
     #[arg(long, default_value = "/tmp/QMDB_bench_sendeth")]
     pub db_dir: String,
@@ -70,4 +88,51 @@ pub struct BenchmarkCli {
     /// Used in prepare-workload and replay-workload
     #[arg(long, default_value_t = 0)]
     pub txn_per_transfer_block: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executor_selection_and_default_metadata() {
+        let default =
+            BenchmarkCli::try_parse_from(["bench-sendeth", "--workload", "eth", "replay-workload"])
+                .unwrap();
+        assert_eq!(default.executor, Executor::Fafo);
+        assert!(serde_json::to_value(&default)
+            .unwrap()
+            .get("executor")
+            .is_none());
+        for position in [
+            vec![
+                "bench-sendeth",
+                "--workload",
+                "eth",
+                "--executor",
+                "occ",
+                "replay-workload",
+            ],
+            vec![
+                "bench-sendeth",
+                "--workload",
+                "eth",
+                "replay-workload",
+                "--executor",
+                "occ",
+            ],
+        ] {
+            let args = BenchmarkCli::try_parse_from(position).unwrap();
+            assert_eq!(args.executor, Executor::Occ);
+            assert_eq!(serde_json::to_value(args).unwrap()["executor"], "occ");
+        }
+        assert!(BenchmarkCli::try_parse_from([
+            "bench-sendeth",
+            "--workload",
+            "eth",
+            "--executor",
+            "serial"
+        ])
+        .is_err());
+    }
 }

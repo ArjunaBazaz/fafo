@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 exepipe = { path = "../exepipe" }
+fafo-occ = { path = "../occ" }
 exepipe-common = { workspace = true, default-features = true }
 qmdb = { workspace = true, default-features = true }
 revm.workspace = true

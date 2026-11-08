@@ -111,6 +111,11 @@ fn replay_workload(
     info!("Starting benchmark with workload: {}", args.workload);
     let ref_dir = token_setup.get_data_dir(&args.db_dir);
     let run_dir = token_setup.get_data_dir(&args.db_dir) + "_run";
+    let run_dir = if args.executor == cli::Executor::Occ {
+        run_dir + "_occ"
+    } else {
+        run_dir
+    };
     info!("Resetting directory: {}", run_dir);
     utils::reset_dir(&ref_dir, &run_dir);
 
@@ -137,6 +142,10 @@ fn replay_workload(
 
     // Calculate additional metrics based on values
     let values = metrics_recorder.snapshot_values();
+    if args.executor == cli::Executor::Occ {
+        bench_sendeth::common::occ_adapter::report(&values, token_setup.transfer_txn_count);
+        return;
+    }
     let task_level_parallelism =
         values["framer.tasks_processed"] / values["framer.frames_generated"];
     metrics::gauge!("framer.task_level_parallelism").set(task_level_parallelism);
@@ -221,7 +230,14 @@ fn main() {
         args.output.clone()
     } else {
         let run_dir = token_setup.get_data_dir(&args.db_dir);
-        format!("{}/metrics/{}.json", run_dir, cmd)
+        let prefix = if args.executor == cli::Executor::Occ
+            && matches!(args.command, Some(cli::Command::ReplayWorkload { .. }))
+        {
+            "occ_"
+        } else {
+            ""
+        };
+        format!("{}/metrics/{}{}.json", run_dir, prefix, cmd)
     };
     let run_end_ts = Utc::now();
     let duration_secs = (run_end_ts - run_start_ts).num_milliseconds() as f64 / 1000.0;

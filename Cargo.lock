@@ -853,6 +853,7 @@ dependencies = [
  "env_logger",
  "exepipe",
  "exepipe-common",
+ "fafo-occ",
  "hpfile",
  "indicatif",
  "log",
@@ -1671,6 +1672,21 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "fafo-occ"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "codedb",
+ "crossbeam",
+ "exepipe",
+ "exepipe-common",
+ "parking_lot",
+ "qmdb",
+ "rayon",
+ "revm",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 # bench-sendeth
 
 `bench-sendeth` is a synthetic workload generator and replay harness used to
-benchmark **FAFO**.  It can:
+benchmark **FAFO** (the default) or **OCC**.  It can:
 
 1. **Initialise** a large key-value database with billions of accounts.
 2. **Generate** transfer workloads with tunable contention or derived from a real
@@ -19,6 +19,23 @@ The one-liner below runs a *small* benchmark suitable for laptops, taking only a
 ```bash
 ./run.sh --size fast
 ```
+
+Select OCC with one additional flag, keeping the same database, workload, and
+timing boundaries:
+
+```bash
+./run.sh --size fast --executor occ
+./run.sh --size fast --executor fafo
+```
+
+The Rust CLI also accepts `--executor fafo|occ` with `replay-workload`.
+FAFO retains its original execution loop and metrics. A thin
+[`occ_adapter.rs`](src/common/occ_adapter.rs) calls the isolated OCC executor;
+it uses 101 workers plus the coordinator, matching FAFO's peak scheduler thread
+budget. Both use the same QMDB/CodeDB settings and process CPU limits.
+OCC uses a separate `_run_occ` database copy and `occ_` metrics filename prefix;
+its scheduler statistics are under `occ.*`. Common duration and throughput
+metrics have the same names. An explicit `--output` overrides either filename.
 
 The script will:
 

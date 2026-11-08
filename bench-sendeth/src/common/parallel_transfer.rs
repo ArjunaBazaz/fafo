@@ -179,7 +179,7 @@ pub fn parallel_transfer(
     let start_height = ads.get_metadb().read().get_curr_height();
     debug!("start_height={}", start_height);
 
-    let mut pipe = ExePipe::new(ads, dir);
+    let mut pipe = super::occ_adapter::SelectedExecutor::new(args.executor, ads, dir);
 
     let blk_file = File::options()
         .read(true)
@@ -225,14 +225,17 @@ pub fn parallel_transfer(
     // 2. Spawn a thread for pipeline (pre_state_cache?)
     let (task_sender, task_receiver) = sync_channel(4);
     let (done_sender, done_receiver) = sync_channel(1);
-    std::thread::spawn(move || {
-        executor_loop(
+    std::thread::spawn(move || match pipe {
+        super::occ_adapter::SelectedExecutor::Fafo(mut pipe) => executor_loop(
             task_receiver,
             done_sender,
             &mut pipe,
             start_height,
             &pb_exec,
-        )
+        ),
+        super::occ_adapter::SelectedExecutor::Occ(mut pipe) => {
+            super::occ_adapter::executor_loop(task_receiver, done_sender, &mut pipe, &pb_exec)
+        }
     });
 
     // 3. Main loop of benchmark
