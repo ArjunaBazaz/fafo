@@ -1,22 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use serde::Serialize;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum ExecutorKind {
-    #[default]
-    Fafo,
-    Occ,
-}
-
-impl std::fmt::Display for ExecutorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Fafo => "fafo",
-            Self::Occ => "occ",
-        })
-    }
-}
 
 #[derive(Subcommand, Debug, Serialize, Clone)]
 pub enum Command {
@@ -51,22 +34,6 @@ pub enum Command {
 
 #[derive(Parser, Debug, Serialize, Clone)]
 pub struct BenchmarkCli {
-    /// Execution algorithm; both receive the same total scheduler thread budget.
-    #[arg(long, global = true, value_enum, default_value_t = ExecutorKind::Fafo)]
-    pub executor: ExecutorKind,
-
-    /// Total scheduler threads, including its coordinator and auxiliary threads.
-    #[arg(long, global = true, default_value_t = exepipe::resources::DEFAULT_SCHEDULER_THREADS)]
-    pub scheduler_threads: usize,
-
-    /// Bind the process and all its threads to the first N allowed logical CPUs (Linux).
-    #[arg(long, global = true)]
-    pub cpu_cores: Option<usize>,
-
-    /// Maximum OCC transactions in flight; does not change its thread budget.
-    #[arg(long, global = true, default_value_t = 128)]
-    pub occ_window: usize,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 

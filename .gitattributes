@@ -1,3 +1,2 @@
 patches/** linguist-vendored
 doc/** linguist-vendored
-bench-sendeth/run.sh text eol=lf

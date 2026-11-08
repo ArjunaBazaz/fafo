@@ -5,11 +5,8 @@ extern crate core;
 pub mod context;
 pub mod def;
 pub mod dispatcher;
-mod execution_stats;
 pub mod exetask;
 pub mod framer;
-pub mod occ;
-pub mod resources;
 pub mod simulator;
 pub mod test_helper;
 pub mod utils;
@@ -79,14 +76,6 @@ pub struct ExePipe {
 
 impl ExePipe {
     pub fn new(ads: AdsWrap<ExeTask>, dir: &str) -> Self {
-        Self::with_resources(ads, dir, resources::ExecutionResources::default())
-    }
-
-    pub fn with_resources(
-        ads: AdsWrap<ExeTask>,
-        dir: &str,
-        budget: resources::ExecutionResources,
-    ) -> Self {
         let wrbuf_size = 8 * 1024 * 1024; //8MB
         let file_segment_size = 256 * 1024 * 1024; // 256MB
 
@@ -94,16 +83,13 @@ impl ExePipe {
         let (codedb_size, _) = Self::split_extra_data(&extra_data);
         let code_db = Arc::new(CodeDB::new(dir, codedb_size, wrbuf_size, file_segment_size));
 
-        let dispatcher = Dispatcher::new(
-            resources::FAFO_WARMUP_THREADS,
-            budget.fafo_execution_workers(),
-        );
+        let dispatcher = Dispatcher::new(12, 64); //8, 64 is bad
         Self {
             dispatcher,
             ads,
             code_db,
             block_hashes: HashMap::with_capacity(256),
-            sim_tpool: Arc::new(ThreadPool::new(resources::FAFO_SIMULATION_THREADS)),
+            sim_tpool: Arc::new(ThreadPool::new(16)),
         }
     }
 
@@ -113,11 +99,7 @@ impl ExePipe {
         blk: Block,
         cache: Arc<StateCache>,
     ) -> Arc<StateCache> {
-        // Each caller shard may leave a partial task, plus the end-block task.
-        let tx_count: usize = task_in.iter().map(Vec::len).sum();
-        let size = tx_count.div_ceil(dispatcher::def::TX_IN_TASK)
-            + simulator::simulator::SIM_SHARD_COUNT
-            + 1;
+        let size = task_in.len() * 110 / 100; //with some margin
         let task_manager = Arc::new(TasksManager::with_size(size));
 
         let height = blk.height;
@@ -163,7 +145,7 @@ impl ExePipe {
         }
         simulator.end_block();
         handler.join().unwrap();
-        blk_ctx.curr_state.clone()
+        cache
     }
 
     pub fn run_block(
@@ -210,7 +192,7 @@ impl ExePipe {
         handler.join().unwrap();
 
         //self.dispatcher.wait_done_height(blk_ctx.blk.height);
-        blk_ctx.curr_state.clone()
+        cache
     }
 
     pub fn insert_code(&mut self, addr: &Address, code: Bytecode) {

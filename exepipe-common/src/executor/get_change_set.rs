@@ -19,7 +19,6 @@ use revm::{
 use std::collections::HashMap;
 
 use super::error::ExecutionError;
-use super::AccessPolicy;
 
 pub type ChangeSetResult =
     Result<(ChangeSet, u128, u64, HashMap<Address, Bytecode>), ExecutionError>;
@@ -36,13 +35,6 @@ pub struct ChangeSetConfig<'a> {
 }
 
 pub fn get_change_set(config: ChangeSetConfig) -> ChangeSetResult {
-    get_change_set_with_policy(config, AccessPolicy::EnforcePredicted)
-}
-
-pub fn get_change_set_with_policy(
-    config: ChangeSetConfig,
-    access_policy: AccessPolicy,
-) -> ChangeSetResult {
     let mut change_set = ChangeSet::new();
     let mut created_code_map = HashMap::with_capacity(1);
 
@@ -83,11 +75,10 @@ pub fn get_change_set_with_policy(
 
             if let Some(op_type) = op_type_opt {
                 let hash = hasher::hash(address);
-                if access_policy == AccessPolicy::EnforcePredicted
-                    && !(config
-                        .to_addr_access
-                        .is_some_and(|(addr, ro)| !ro && &addr == address)
-                        || config.crw_sets.has_write_access(&extract_short_hash(&hash)))
+                if !(config
+                    .to_addr_access
+                    .is_some_and(|(addr, ro)| !ro && &addr == address)
+                    || config.crw_sets.has_write_access(&extract_short_hash(&hash)))
                 {
                     return Err(ExecutionError::WritedAccountNotIncluded(*address));
                 }
@@ -118,9 +109,7 @@ pub fn get_change_set_with_policy(
             }
             addr_idx[20..].copy_from_slice(idx.as_le_slice());
             let hash = hasher::hash(addr_idx);
-            if access_policy == AccessPolicy::EnforcePredicted
-                && !config.crw_sets.has_write_access(&extract_short_hash(&hash))
-            {
+            if !config.crw_sets.has_write_access(&extract_short_hash(&hash)) {
                 return Err(ExecutionError::WritedSlotNotIncluded {
                     addr: *address,
                     index: *idx,

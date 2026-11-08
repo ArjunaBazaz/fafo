@@ -7,7 +7,7 @@
 //      - model (simple, barabasi-albert)
 // - replay-workload (fast) (token: native/erc20)
 use bench_sendeth::common::generators;
-use bench_sendeth::common::{cli, def, init, resources, utils};
+use bench_sendeth::common::{cli, def, init, utils};
 use chrono::Utc;
 use clap::Parser;
 use log::info;
@@ -110,11 +110,7 @@ fn replay_workload(
 ) {
     info!("Starting benchmark with workload: {}", args.workload);
     let ref_dir = token_setup.get_data_dir(&args.db_dir);
-    let run_dir = format!(
-        "{}_run_{}",
-        token_setup.get_data_dir(&args.db_dir),
-        args.executor
-    );
+    let run_dir = token_setup.get_data_dir(&args.db_dir) + "_run";
     info!("Resetting directory: {}", run_dir);
     utils::reset_dir(&ref_dir, &run_dir);
 
@@ -139,57 +135,22 @@ fn replay_workload(
     info!("Time elapsed in parallel_transfer() is: {:.1?}", duration);
     metrics::gauge!("bench-sendeth.replay.duration_s").set(duration.as_secs_f64());
 
-    resources::record_process_usage();
-    // Both modes count only final outcomes, after all execution and persistence.
+    // Calculate additional metrics based on values
     let values = metrics_recorder.snapshot_values();
-    let finalized = values.get("execution.finalized").copied().unwrap_or(0.0);
-    assert_eq!(
-        finalized, token_setup.transfer_txn_count as f64,
-        "executor did not finalize every input transaction"
+    let task_level_parallelism =
+        values["framer.tasks_processed"] / values["framer.frames_generated"];
+    metrics::gauge!("framer.task_level_parallelism").set(task_level_parallelism);
+    let txn_level_parallelism = values["framer.txns_processed"] / values["framer.frames_generated"];
+    metrics::gauge!("framer.txn_level_parallelism").set(txn_level_parallelism);
+    info!(
+        "Framer: TaskLevelParallelism={:.1} = {} tasks / {} frames",
+        task_level_parallelism, values["framer.tasks_processed"], values["framer.frames_generated"]
     );
     info!(
-        "{}: finalized={} successful={} reverted={} halted={} invalid={}",
-        args.executor,
-        finalized,
-        values.get("execution.successful").unwrap_or(&0.0),
-        values.get("execution.reverted").unwrap_or(&0.0),
-        values.get("execution.halted").unwrap_or(&0.0),
-        values.get("execution.invalid").unwrap_or(&0.0)
+        "Framer: TxnLevelParallelism= {:.1} = {} txns  / {} frames",
+        txn_level_parallelism, values["framer.txns_processed"], values["framer.frames_generated"]
     );
-    if args.executor == cli::ExecutorKind::Fafo {
-        let task_level_parallelism =
-            values["framer.tasks_processed"] / values["framer.frames_generated"];
-        metrics::gauge!("framer.task_level_parallelism").set(task_level_parallelism);
-        let txn_level_parallelism =
-            values["framer.txns_processed"] / values["framer.frames_generated"];
-        metrics::gauge!("framer.txn_level_parallelism").set(txn_level_parallelism);
-        info!(
-            "Framer: TaskLevelParallelism={:.1} = {} tasks / {} frames",
-            task_level_parallelism,
-            values["framer.tasks_processed"],
-            values["framer.frames_generated"]
-        );
-        info!(
-            "Framer: TxnLevelParallelism= {:.1} = {} txns  / {} frames",
-            txn_level_parallelism,
-            values["framer.txns_processed"],
-            values["framer.frames_generated"]
-        );
-        assert!(values["framer.txns_processed"] == token_setup.transfer_txn_count as f64);
-    } else {
-        let attempts = values.get("occ.attempts").copied().unwrap_or(0.0);
-        let failures = values
-            .get("occ.validation_failures")
-            .copied()
-            .unwrap_or(0.0);
-        metrics::gauge!("occ.attempts_per_finalized_txn").set(attempts / finalized.max(1.0));
-        info!(
-            "OCC: attempts={} validation_failures={} attempts/txn={:.3}",
-            attempts,
-            failures,
-            attempts / finalized.max(1.0)
-        );
-    }
+    assert!(values["framer.txns_processed"] == token_setup.transfer_txn_count as f64);
 }
 
 fn main() {
@@ -197,9 +158,6 @@ fn main() {
     let run_start_ts = Utc::now();
     let metrics_recorder = utils::MetricsRecorder::new();
     let args = cli::BenchmarkCli::parse();
-    let cpus = resources::configure(&args);
-    let resource_report = resources::report(&args, &cpus);
-    info!("Executor={} resources={}", args.executor, resource_report);
     if args.workload != "token" && args.workload != "eth" {
         panic!("Invalid workload: {}", args.workload);
     }
@@ -226,8 +184,7 @@ fn main() {
                 &metrics_recorder,
             );
             format!(
-                "replay_{}_{}",
-                args.executor,
+                "replay_{}",
                 Path::new(blocks_workload_filename)
                     .file_name()
                     .unwrap()
@@ -282,7 +239,6 @@ fn main() {
         },
         "entry_count": token_setup.entry_count,
         "transfer_txn_count": token_setup.transfer_txn_count,
-        "resources": resource_report,
         "metrics": metrics_data
     });
 

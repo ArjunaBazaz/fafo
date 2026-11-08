@@ -10,35 +10,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 
 pub fn reset_dir(ref_dir: &str, run_dir: &str) {
-    // The generated run directory must be a dedicated sibling of the reference.
-    // Remove old contents so stale QMDB segments cannot survive a replay reset.
-    let reference = std::fs::canonicalize(ref_dir).expect("reference database missing");
-    let run_path = std::path::Path::new(run_dir);
-    let parent =
-        std::fs::canonicalize(run_path.parent().expect("run directory needs a parent")).unwrap();
-    assert_eq!(
-        Some(parent.as_path()),
-        reference.parent(),
-        "run directory must be a sibling of the reference"
-    );
-    if run_path.exists() {
-        let target = std::fs::canonicalize(run_path).unwrap();
-        assert_ne!(target, reference, "cannot reset the reference database");
-        assert_eq!(
-            target.parent(),
-            reference.parent(),
-            "run directory resolves outside the database parent"
-        );
-        std::fs::remove_dir_all(run_path).expect("cannot clear previous replay database");
-    }
-    std::fs::create_dir_all(run_path).unwrap();
     // Use rsync to reset directory to the reference, fall back to cp if rsync is unavailable/unsupported
     info!("Syncing directory from {} to {}...", ref_dir, run_dir);
 
     // Try rsync first (without --info=progress2 which is unsupported on macOS)
     let rsync_status = Command::new("rsync")
         .arg("-a")
-        .arg("--delete")
         .arg(format!("{}/", ref_dir))
         .arg(format!("{}/", run_dir))
         .stdout(Stdio::inherit())
@@ -61,14 +38,13 @@ pub fn reset_dir(ref_dir: &str, run_dir: &str) {
         let cp_status = Command::new("cp")
             .arg("-R")
             .arg("-f")
-            .arg(format!("{}/.", ref_dir))
+            .arg(format!("{}/", ref_dir))
             .arg(format!("{}/", run_dir))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
             .expect("Failed to execute cp command");
         debug!("cp exited with: {}", cp_status);
-        assert!(cp_status.success(), "failed to copy the reference database");
     }
 
     // Brief pause to ensure filesystem settles before subsequent operations
@@ -77,27 +53,6 @@ pub fn reset_dir(ref_dir: &str, run_dir: &str) {
 
 pub fn init_logging(max_level: &str) {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or(max_level));
-}
-
-#[cfg(test)]
-mod replay_reset_tests {
-    use super::*;
-
-    #[test]
-    fn replay_reset_discards_stale_files_and_preserves_reference() {
-        let temp = tempfile::tempdir().unwrap();
-        let reference = temp.path().join("reference");
-        let run = temp.path().join("reference_run_occ");
-        std::fs::create_dir(&reference).unwrap();
-        std::fs::create_dir(&run).unwrap();
-        std::fs::write(reference.join("state"), b"initial").unwrap();
-        std::fs::write(run.join("state"), b"modified").unwrap();
-        std::fs::write(run.join("stale-segment"), b"stale").unwrap();
-        reset_dir(reference.to_str().unwrap(), run.to_str().unwrap());
-        assert_eq!(std::fs::read(run.join("state")).unwrap(), b"initial");
-        assert_eq!(std::fs::read(reference.join("state")).unwrap(), b"initial");
-        assert!(!run.join("stale-segment").exists());
-    }
 }
 
 #[derive(Serialize)]
