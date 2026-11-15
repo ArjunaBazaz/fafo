@@ -204,6 +204,52 @@ exit status, and identifies any summary as covering only completed runs.
 The runner uses only Python's standard library and requires Linux/WSL. Its tests
 can be run with `python3 -m unittest discover -s bench-sendeth/tests -v`.
 
+To diagnose OCC coordinator versus global-overlay-lock costs, enable optional
+timing counters when running the benchmark. Rebuild first to include them:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/fafo-bench-target
+export RUSTFLAGS="-Awarnings"
+cargo build --locked --release -p bench-sendeth --bin bench-sendeth
+
+OCC_TIMINGS=1 python3 bench-sendeth/run_benchmarks.py \
+  --binary "$CARGO_TARGET_DIR/release/bench-sendeth" \
+  --db-dir /mnt/ssd/fafo-benchmark-data \
+  --size medium --token eth --generator hotn \
+  --contention-degree 0.5 --skew 10 --executor occ \
+  --n 3 --filename results/occ-medium-0.5-10-timed.log
+
+python3 bench-sendeth/report_occ_timings.py \
+  results/occ-medium-0.5-10-timed.log.runs
+```
+
+The report aggregates the per-run metric files. Pass one `run-001.metrics.json`
+file instead to examine a single trial. `OCC_TIMINGS=1` also works with `run.sh`
+or the direct binary. It is read only when constructing an OCC executor; FAFO
+does not collect these diagnostics. Omit the variable or set `OCC_TIMINGS=0` for
+baseline measurements.
+
+Interpret the scheduler breakdown as follows:
+
+- High publication **lock acquisition** time means the coordinator is delayed
+  acquiring the global write lock. Examine worker read-lock hold times too:
+  the existing read guard includes underlying database reads.
+- High validation/publication **work while holding the lock**, callback or job
+  submission time indicates serialized coordinator work. Work under the write
+  lock also delays workers, so both effects can occur together.
+- High ordered-result wait time points to slow initial attempts or scheduling
+  delays at the front of the commit order. Worker read-lock acquisition times
+  help distinguish lock stalls from other worker costs.
+- Retry time includes retry read locks, execution and change-set conversion.
+  Compaction, result destruction and final flush are reported separately.
+
+These are wall-clock timings, including possible descheduling. Acquisition
+times include uncontended overhead; worker sums overlap and must not be added
+to block duration. Compaction is included in finalize time, and retry read-lock
+times are included in retry duration. Diagnostic clocks perturb performance;
+compare throughput using an additional run with `OCC_TIMINGS` disabled. The
+external CPU utilization retains its whole-command scope.
+
 Metrics are recorded with [`metrics`](https://docs.rs/metrics) and written as a
 pretty-printed JSON.  When using `run.sh` the file ends up in
 `$DB_DIR/exepipe_bencheth/<…>/metrics/*.json` and includes:

@@ -41,6 +41,7 @@ fn runtime(ads: MockADS, dir: &str) -> Runtime<MockADS> {
         height: 1,
         env: BlockEnv::default(),
         block_hashes: HashMap::new(),
+        timings_enabled: false,
     }
 }
 
@@ -312,7 +313,7 @@ fn reverted_contract_changes_are_not_published() {
     assert_eq!(account(&r, 100).unwrap().nonce, 1);
 }
 
-fn persisted_run(workers: usize, window: usize) -> Vec<[u8; 32]> {
+fn persisted_run(workers: usize, window: usize, timings_enabled: bool) -> Vec<[u8; 32]> {
     use exepipe_common::acc_data::decode_account_info_from_bz;
     use qmdb::entryfile::readbuf::ReadBuf;
     let temp = tempfile::tempdir().unwrap();
@@ -353,6 +354,7 @@ fn persisted_run(workers: usize, window: usize) -> Vec<[u8; 32]> {
         },
     )
     .unwrap();
+    executor.set_timings_enabled(timings_enabled);
     let block = |height| {
         Block::new(
             height,
@@ -376,6 +378,27 @@ fn persisted_run(workers: usize, window: usize) -> Vec<[u8; 32]> {
         .unwrap();
     assert_eq!(result.stats.finalized, 2);
     assert_eq!(result.stats.persistence_tasks, 1);
+    assert_eq!(result.stats.timings.is_some(), timings_enabled);
+    if let Some(timing) = result.stats.timings {
+        assert!(timing.block_ns >= timing.setup_ns + timing.scheduler_ns + timing.finalize_ns);
+        assert!(timing.finalize_ns >= timing.compaction_ns);
+        assert_eq!(
+            timing.coordinator_validation.acquisitions,
+            result.stats.attempts as u64
+        );
+        assert_eq!(
+            timing.coordinator_publication.acquisitions,
+            result.stats.applied as u64
+        );
+        assert!(timing.worker_reads.acquisitions >= result.stats.finalized as u64 * 2);
+        assert!(
+            timing.worker_attempt_ns >= timing.worker_reads.wait_ns + timing.worker_reads.hold_ns
+        );
+        assert_eq!(
+            timing.retry_reads.acquisitions == 0,
+            result.stats.validation_failures == 0
+        );
+    }
     assert!(result
         .results
         .iter()
@@ -385,8 +408,14 @@ fn persisted_run(workers: usize, window: usize) -> Vec<[u8; 32]> {
         .run_block(vec![vec![transfer(102, 100, 2)]], block(3))
         .unwrap();
     let result = executor.run_block(vec![], block(4)).unwrap();
-    assert_eq!(result.stats, OccStats::default());
-    executor.flush().unwrap();
+    let mut counters = result.stats;
+    counters.timings = None;
+    assert_eq!(counters, OccStats::default());
+    let flush = executor.flush_with_timings().unwrap();
+    assert_eq!(flush.is_some(), timings_enabled);
+    if let Some(timing) = flush {
+        assert!(timing.total_ns >= timing.qmdb_ns + timing.code_ns + timing.overlay_clear_ns);
+    }
     executor
         .run_block(vec![vec![transfer(101, 102, 1)]], block(5))
         .unwrap();
@@ -414,7 +443,31 @@ fn persisted_run(workers: usize, window: usize) -> Vec<[u8; 32]> {
 #[test]
 #[serial_test::serial]
 fn qmdb_commits_match_serial_across_blocks_and_overlay_flush() {
-    assert_eq!(persisted_run(1, 1), persisted_run(2, 4));
+    assert_eq!(persisted_run(1, 1, false), persisted_run(2, 4, false));
+}
+
+#[test]
+#[serial_test::serial]
+fn optional_timings_preserve_persisted_state_and_account_for_operations() {
+    assert_eq!(persisted_run(2, 4, false), persisted_run(2, 4, true));
+}
+
+#[test]
+fn optional_timings_include_failed_speculative_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut r = runtime(MockADS::new(), temp.path().to_str().unwrap());
+    r.timings_enabled = true;
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let stats = scheduler::run(&r, &[transfer(100, 101, 1)], &pool, 1, |_, a| {
+        assert!(a.output.0.is_err());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(stats.errors, 1);
+    let timing = stats.timings.unwrap();
+    assert_eq!(timing.worker_reads.acquisitions, 2); // snapshot plus missing caller
+    assert_eq!(timing.coordinator_validation.acquisitions, 1);
+    assert_eq!(timing.coordinator_publication.acquisitions, 0);
 }
 
 #[test]

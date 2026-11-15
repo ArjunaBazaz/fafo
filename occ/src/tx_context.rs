@@ -1,5 +1,6 @@
 //! Actual reads are recorded here, independently of FAFO's prediction proxy.
 use super::state::{ReadSet, VersionedState};
+use super::timing::LockTimings;
 use codedb::CodeDB;
 use exepipe_common::executor::error::DBError;
 use exepipe_common::slot_entry_value::SlotEntryValue;
@@ -20,6 +21,7 @@ pub(crate) struct Runtime<T: ADS> {
     pub height: i64,
     pub env: BlockEnv,
     pub block_hashes: HashMap<u64, B256>,
+    pub timings_enabled: bool,
 }
 
 pub(crate) struct TxContext<'a, T: ADS> {
@@ -28,6 +30,7 @@ pub(crate) struct TxContext<'a, T: ADS> {
     pub reads: ReadSet,
     pub orig_acc_map: HashMap<Address, Option<AccountInfo>>,
     pub orig_slot_dust_map: HashMap<Hash32, Option<u128>>,
+    pub read_timing: Option<LockTimings>,
 }
 
 impl<'a, T: ADS> TxContext<'a, T> {
@@ -38,6 +41,7 @@ impl<'a, T: ADS> TxContext<'a, T> {
             reads: ReadSet::new(),
             orig_acc_map: HashMap::new(),
             orig_slot_dust_map: HashMap::new(),
+            read_timing: runtime.timings_enabled.then(LockTimings::default),
         }
     }
 }
@@ -51,9 +55,15 @@ impl<T: ADS> Database for TxContext<'_, T> {
         }
         let hash = hasher::hash(address);
         let r = self.runtime;
-        let (version, info) =
-            r.state
-                .account(&r.ads, &r.code_db, r.height, self.snapshot, &address, &hash);
+        let (version, info) = r.state.account_timed(
+            &r.ads,
+            &r.code_db,
+            r.height,
+            self.snapshot,
+            &address,
+            &hash,
+            self.read_timing.as_mut(),
+        );
         self.reads.insert(hash, version);
         self.orig_acc_map.insert(address, info.clone());
         Ok(info)
@@ -63,7 +73,14 @@ impl<T: ADS> Database for TxContext<'_, T> {
         let key = join_address_index(&address, &index);
         let hash = hasher::hash(key);
         let r = self.runtime;
-        let (version, value) = r.state.read(&r.ads, r.height, self.snapshot, &hash, &key);
+        let (version, value) = r.state.read_timed(
+            &r.ads,
+            r.height,
+            self.snapshot,
+            &hash,
+            &key,
+            self.read_timing.as_mut(),
+        );
         self.reads.insert(hash, version);
         match value {
             None => {

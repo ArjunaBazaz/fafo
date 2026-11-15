@@ -88,6 +88,41 @@ crate does not alter CPU affinity or impose a memory quota on either executor.
 
 ## Execution and state
 
+Optional wall-clock diagnostics are enabled through
+`OccExecutor::set_timings_enabled(true)` or `OCC_TIMINGS=1` when using the
+benchmark. `OccStats.timings` then contains the per-block breakdown; it is
+`None` by default. `flush_with_timings()` provides the final drain breakdown
+without changing the existing `flush()` API. The benchmark records additive
+`occ.timing.*` counters in its existing JSON output and prints a short timing
+line per block.
+
+Worker timers and read-lock counters are accumulated locally per attempt and
+merged by the coordinator, including rejected attempts and failed executions.
+Coordinator retries have separate read-lock counters. No shared atomic timing
+counter is updated for each read. Disabled diagnostics perform no clock reads.
+Enabled diagnostics add clock/aggregation overhead and can change scheduling
+and retry rates, so collect baseline throughput with diagnostics disabled too.
+
+The scheduler breakdown separates ordered-result waits, job submission,
+validation lock acquisition and hold/work time, publication lock acquisition
+and hold/work time, synchronous retries, and commit callbacks. Unattributed
+scheduler time includes bookkeeping, measurement overhead and scoped-worker
+teardown. Retry time includes its snapshot reads, execution, conversion and
+discard of the old attempt; retry read-lock times are subsets of that total.
+Worker attempt wall times include snapshot acquisition and execution and are
+summed across workers, so they overlap each other and coordinator time.
+
+Lock acquisition time includes uncontended lock overhead and scheduling delays;
+it does not count only contended acquisitions. Hold time includes all operations
+performed while holding the guard, including base reads and account decoding.
+It is wall time, not thread CPU time. Compaction is a subset of block finalize
+time. Result destruction is timed by the adapter after `run_block` returns;
+final flush is also outside block timing. Setup includes QMDB block admission
+and durability pruning. These counters do not include database copying or ADS
+construction, unlike the external CPU-utilization measurement.
+
+See `bench-sendeth/readme.md` for commands and the timing report helper.
+
 Workers execute private attempts against a versioned committed snapshot and
 record actual account/storage reads, including absence reads and storage dust
 metadata. A snapshot is acquired when the worker starts, not when work is queued.

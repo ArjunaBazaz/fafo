@@ -1,6 +1,7 @@
 //! Execute once without predictions; reuse the unchanged state encoder only
 //! after actual writes are known. No FAFO scheduling/access-check code is edited.
 use super::state::ReadSet;
+use super::timing::LockTimings;
 use super::tx_context::{Runtime, TxContext};
 use crate::Tx;
 use exepipe_common::access_set::{
@@ -34,12 +35,16 @@ type ExecutionOutput = (Result<ResultAndState, ExecutionError>, Option<Effects>)
 pub(crate) struct Attempt {
     pub reads: ReadSet,
     pub output: ExecutionOutput,
+    pub read_timing: Option<LockTimings>,
+    pub worker_ns: u64,
 }
 
-fn failed(reads: ReadSet, error: ExecutionError) -> Attempt {
+fn failed(reads: ReadSet, error: ExecutionError, read_timing: Option<LockTimings>) -> Attempt {
     Attempt {
         reads,
         output: (Err(error), None),
+        read_timing,
+        worker_ns: 0,
     }
 }
 
@@ -47,8 +52,20 @@ pub(crate) fn execute<T: ADS>(runtime: &Runtime<T>, tx: &Tx, snapshot: u64) -> A
     let mut db = TxContext::new(runtime, snapshot);
     let caller = match db.basic(tx.env.caller) {
         Ok(Some(info)) => info,
-        Ok(None) => return failed(db.reads, ExecutionError::CallerNotFound(tx.env.caller)),
-        Err(error) => return failed(db.reads, ExecutionError::Other(anyhow::anyhow!(error))),
+        Ok(None) => {
+            return failed(
+                db.reads,
+                ExecutionError::CallerNotFound(tx.env.caller),
+                db.read_timing,
+            )
+        }
+        Err(error) => {
+            return failed(
+                db.reads,
+                ExecutionError::Other(anyhow::anyhow!(error)),
+                db.read_timing,
+            )
+        }
     };
     let gas_price = tx.env.effective_gas_price(runtime.env.basefee as u128);
     let required = U256::from(gas_price)
@@ -58,6 +75,7 @@ pub(crate) fn execute<T: ADS>(runtime: &Runtime<T>, tx: &Tx, snapshot: u64) -> A
         return failed(
             db.reads,
             ExecutionError::Other(anyhow::anyhow!("transaction upfront cost overflow")),
+            db.read_timing,
         );
     };
     if caller.balance < required {
@@ -67,15 +85,17 @@ pub(crate) fn execute<T: ADS>(runtime: &Runtime<T>, tx: &Tx, snapshot: u64) -> A
                 balance: caller.balance,
                 required,
             },
+            db.read_timing,
         );
     }
 
     let (mut evm, result) = run_tx(&runtime.env, &tx.env, db);
     let db = evm.db();
     let reads = std::mem::take(&mut db.reads);
+    let read_timing = db.read_timing.take();
     let result = match result {
         Ok(result) => result,
-        Err(error) => return failed(reads, ExecutionError::EVMError(error)),
+        Err(error) => return failed(reads, ExecutionError::EVMError(error), read_timing),
     };
 
     // This is post-execution permission metadata for the shared serializer,
@@ -109,6 +129,8 @@ pub(crate) fn execute<T: ADS>(runtime: &Runtime<T>, tx: &Tx, snapshot: u64) -> A
     match effects {
         Ok((changes, reward, creation_gas, codes)) => Attempt {
             reads,
+            read_timing,
+            worker_ns: 0,
             output: (
                 Ok(result),
                 Some((
@@ -121,6 +143,6 @@ pub(crate) fn execute<T: ADS>(runtime: &Runtime<T>, tx: &Tx, snapshot: u64) -> A
                 )),
             ),
         },
-        Err(error) => failed(reads, error),
+        Err(error) => failed(reads, error, read_timing),
     }
 }

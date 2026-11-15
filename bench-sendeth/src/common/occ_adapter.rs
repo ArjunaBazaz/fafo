@@ -24,7 +24,10 @@ impl SelectedExecutor {
         match selection {
             Executor::Fafo => Self::Fafo(ExePipe::new(ads, dir)),
             Executor::Occ => {
-                Self::Occ(OccExecutor::new(ads, dir, OccConfig::default()).expect("initialize OCC"))
+                let mut executor =
+                    OccExecutor::new(ads, dir, OccConfig::default()).expect("initialize OCC");
+                executor.set_timings_enabled(std::env::var("OCC_TIMINGS").as_deref() == Ok("1"));
+                Self::Occ(executor)
             }
         }
     }
@@ -59,10 +62,46 @@ pub fn executor_loop(
             stats.errors, 0,
             "OCC benchmark encountered final transaction errors"
         );
+        if let Some(timing) = stats.timings {
+            record_timings(timing.measurements());
+            metrics::counter!("occ.timing.blocks").increment(1);
+            log::info!(
+                "OCC timings: block={:.3}s scheduler={:.3}s result_wait={:.3}s validation_wait={:.3}s validation_work={:.3}s publish_wait={:.3}s publish_work={:.3}s retry={:.3}s callback={:.3}s compaction={:.3}s",
+                seconds(timing.block_ns), seconds(timing.scheduler_ns),
+                seconds(timing.coordinator_result_wait_ns),
+                seconds(timing.coordinator_validation.wait_ns), seconds(timing.coordinator_validation.hold_ns),
+                seconds(timing.coordinator_publication.wait_ns), seconds(timing.coordinator_publication.hold_ns),
+                seconds(timing.coordinator_retry_ns), seconds(timing.coordinator_callback_ns),
+                seconds(timing.compaction_ns),
+            );
+            let start = std::time::Instant::now();
+            drop(output);
+            metrics::counter!("occ.timing.result_drop_ns")
+                .increment(start.elapsed().as_nanos() as u64);
+        }
     }
     pb.finish_with_message("Finished executor_loop");
-    pipe.flush().expect("flush OCC persistence");
+    if let Some(timing) = pipe.flush_with_timings().expect("flush OCC persistence") {
+        record_timings(timing.measurements());
+        log::info!(
+            "OCC final drain: total={:.3}s QMDB={:.3}s code={:.3}s overlay_clear={:.3}s",
+            seconds(timing.total_ns),
+            seconds(timing.qmdb_ns),
+            seconds(timing.code_ns),
+            seconds(timing.overlay_clear_ns)
+        );
+    }
     done_sender.send(true).unwrap();
+}
+
+fn seconds(nanoseconds: u64) -> f64 {
+    nanoseconds as f64 / 1e9
+}
+
+fn record_timings(measurements: impl IntoIterator<Item = (&'static str, u64)>) {
+    for (name, value) in measurements {
+        metrics::counter!(format!("occ.timing.{name}")).increment(value);
+    }
 }
 
 pub fn report(values: &HashMap<String, f64>, expected: u64) {

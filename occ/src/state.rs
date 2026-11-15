@@ -1,4 +1,5 @@
 //! Versioned committed state. Only the coordinator writes; workers read snapshots.
+use super::timing::{LockTimings, TimedGuard};
 use codedb::CodeDB;
 use exepipe_common::acc_data::decode_account_info_from_bz;
 use parking_lot::{Mutex, RwLock};
@@ -37,6 +38,10 @@ impl VersionedState {
         self.inner.read().version
     }
 
+    pub fn version_timed(&self, timing: Option<&mut LockTimings>) -> u64 {
+        TimedGuard::new(|| self.inner.read(), timing).version
+    }
+
     fn lookup<T: ADS>(
         inner: &Inner,
         ads: &T,
@@ -61,6 +66,7 @@ impl VersionedState {
         }
     }
 
+    #[cfg(test)]
     pub fn read<T: ADS>(
         &self,
         ads: &T,
@@ -72,6 +78,26 @@ impl VersionedState {
         Self::lookup(&self.inner.read(), ads, height, snapshot, hash, key)
     }
 
+    pub fn read_timed<T: ADS>(
+        &self,
+        ads: &T,
+        height: i64,
+        snapshot: u64,
+        hash: &Hash32,
+        key: &[u8],
+        timing: Option<&mut LockTimings>,
+    ) -> (u64, Value) {
+        Self::lookup(
+            &TimedGuard::new(|| self.inner.read(), timing),
+            ads,
+            height,
+            snapshot,
+            hash,
+            key,
+        )
+    }
+
+    #[cfg(test)]
     pub fn account<T: ADS>(
         &self,
         ads: &T,
@@ -81,7 +107,22 @@ impl VersionedState {
         address: &Address,
         hash: &Hash32,
     ) -> (u64, Option<AccountInfo>) {
-        let inner = self.inner.read();
+        self.account_timed(ads, code_db, height, snapshot, address, hash, None)
+    }
+
+    // Preserve the account lookup arguments and add only a local timing sink.
+    #[allow(clippy::too_many_arguments)]
+    pub fn account_timed<T: ADS>(
+        &self,
+        ads: &T,
+        code_db: &CodeDB,
+        height: i64,
+        snapshot: u64,
+        address: &Address,
+        hash: &Hash32,
+        timing: Option<&mut LockTimings>,
+    ) -> (u64, Option<AccountInfo>) {
+        let inner = TimedGuard::new(|| self.inner.read(), timing);
         let (version, value) =
             Self::lookup(&inner, ads, height, snapshot, hash, address.as_slice());
         let Some(value) = value else {
@@ -109,8 +150,13 @@ impl VersionedState {
         (version, Some(info))
     }
 
+    #[cfg(test)]
     pub fn validate(&self, reads: &ReadSet) -> bool {
-        let inner = self.inner.read();
+        self.validate_timed(reads, None)
+    }
+
+    pub fn validate_timed(&self, reads: &ReadSet, timing: Option<&mut LockTimings>) -> bool {
+        let inner = TimedGuard::new(|| self.inner.read(), timing);
         reads.iter().all(|(key, version)| {
             inner
                 .values
@@ -122,8 +168,18 @@ impl VersionedState {
 
     /// Publish all writes together. Even deletions retain a version and an
     /// explicit absence value, so reads cannot resurrect a value from QMDB.
+    #[cfg(test)]
     pub fn publish(&self, changes: &ChangeSet, codes: &HashMap<Address, Bytecode>) {
-        let mut inner = self.inner.write();
+        self.publish_timed(changes, codes, None)
+    }
+
+    pub fn publish_timed(
+        &self,
+        changes: &ChangeSet,
+        codes: &HashMap<Address, Bytecode>,
+        timing: Option<&mut LockTimings>,
+    ) {
+        let mut inner = TimedGuard::new(|| self.inner.write(), timing);
         inner.version += 1;
         let version = inner.version;
         for code in codes.values() {

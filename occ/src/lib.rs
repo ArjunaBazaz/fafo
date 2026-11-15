@@ -8,7 +8,10 @@
 mod attempt;
 mod scheduler;
 mod state;
+mod timing;
 mod tx_context;
+use timing::Clock;
+pub use timing::{LockTimings, OccFlushTimings, OccTimings};
 
 use anyhow::{ensure, Result};
 use codedb::CodeDB;
@@ -73,6 +76,8 @@ pub struct OccStats {
     pub errors: usize,
     /// QMDB tasks containing finalized transactions (excluding end-block).
     pub persistence_tasks: usize,
+    /// Optional wall-clock diagnostics; worker sums overlap coordinator time.
+    pub timings: Option<OccTimings>,
 }
 
 pub struct OccBlockResult {
@@ -90,6 +95,7 @@ pub struct OccExecutor {
     last_height: i64,
     poisoned: bool,
     pending_blocks: VecDeque<(i64, u64)>,
+    timings_enabled: bool,
 }
 
 impl OccExecutor {
@@ -129,7 +135,14 @@ impl OccExecutor {
             last_height,
             poisoned: false,
             pending_blocks: VecDeque::new(),
+            timings_enabled: false,
         })
+    }
+
+    /// Enable diagnostic clocks between blocks. Off by default; no Instant
+    /// calls or shared timing counters are used on the normal execution path.
+    pub fn set_timings_enabled(&mut self, enabled: bool) {
+        self.timings_enabled = enabled;
     }
 
     pub fn insert_code(&mut self, address: &Address, code: Bytecode) -> Result<()> {
@@ -155,6 +168,7 @@ impl OccExecutor {
         task_in: Vec<Vec<Box<Tx>>>,
         block: Block,
     ) -> Result<OccBlockResult> {
+        let block_clock = Clock::start(self.timings_enabled);
         ensure!(!self.poisoned, "OCC executor has an incomplete block");
         let height = i64::try_from(block.env.number)?;
         ensure!(
@@ -193,9 +207,11 @@ impl OccExecutor {
             height,
             env: block.env,
             block_hashes: self.block_hashes.clone(),
+            timings_enabled: self.timings_enabled,
         };
         let mut results = Vec::with_capacity(transactions.len());
         let mut pending_changes = Vec::with_capacity(batch_size);
+        let setup_ns = block_clock.elapsed_ns();
         let mut stats = scheduler::run(
             &runtime,
             &transactions,
@@ -226,6 +242,7 @@ impl OccExecutor {
                 Ok(())
             },
         )?;
+        let finalize_clock = Clock::start(self.timings_enabled);
         stats.persistence_tasks = persistence_tasks;
         // Match the current FAFO path: beneficiary rewards are disabled in the
         // shared EVM handler and its block gas-fee accumulator is not populated.
@@ -239,11 +256,19 @@ impl OccExecutor {
             true,
             Vec::new(),
         );
+        let compaction_clock = Clock::start(self.timings_enabled);
         self.state.compact();
+        let compaction_ns = compaction_clock.elapsed_ns();
         self.pending_blocks
             .push_back((height, self.state.version()));
         self.last_height = height;
         self.poisoned = false;
+        if let Some(timing) = stats.timings.as_mut() {
+            timing.setup_ns = setup_ns;
+            timing.compaction_ns = compaction_ns;
+            timing.finalize_ns = finalize_clock.elapsed_ns();
+            timing.block_ns = block_clock.elapsed_ns();
+        }
         Ok(OccBlockResult { results, stats })
     }
 
@@ -266,12 +291,29 @@ impl OccExecutor {
 
     /// Drain QMDB and code writes, then release the inter-block state overlay.
     pub fn flush(&mut self) -> Result<()> {
+        self.flush_with_timings().map(|_| ())
+    }
+
+    /// Same drain as `flush`; optional timing breakdown for the caller.
+    pub fn flush_with_timings(&mut self) -> Result<Option<OccFlushTimings>> {
         ensure!(!self.poisoned, "OCC executor has an incomplete block");
+        let total_clock = Clock::start(self.timings_enabled);
+        let qmdb_clock = Clock::start(self.timings_enabled);
         self.ads.flush();
+        let qmdb_ns = qmdb_clock.elapsed_ns();
+        let code_clock = Clock::start(self.timings_enabled);
         self.code_db.flush()?;
+        let code_ns = code_clock.elapsed_ns();
+        let clear_clock = Clock::start(self.timings_enabled);
         self.state.clear();
         self.pending_blocks.clear();
-        Ok(())
+        let overlay_clear_ns = clear_clock.elapsed_ns();
+        Ok(self.timings_enabled.then(|| OccFlushTimings {
+            total_ns: total_clock.elapsed_ns(),
+            qmdb_ns,
+            code_ns,
+            overlay_clear_ns,
+        }))
     }
 }
 
