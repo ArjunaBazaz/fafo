@@ -161,6 +161,49 @@ No additional flags.
 
 ## Metrics output
 
+To repeat a configuration and collect throughput, OCC attempt abort rates and
+CPU utilization, use the standalone Python runner from the repository root:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/fafo-bench-target
+python3 bench-sendeth/run_benchmarks.py \
+  --db-dir /mnt/ssd/fafo-benchmark-data \
+  --size medium --token eth --generator hotn \
+  --contention-degree 0.2 --skew 10 --executor occ \
+  -n 5 --filename results/occ-medium-0.2-10.log
+```
+
+It accepts the same benchmark flags as `run.sh`, plus `-n`/`--n`/`--runs` and
+`--filename` (`--output`/`-o` are aliases). Use `--executor fafo` for FAFO.
+It builds the release executable once, initializes the reference database if
+missing, and generates the selected workload once per invocation. Generation
+replaces that configuration's workload file. Each measured replay uses the
+existing benchmark execution path. `--binary /path/to/bench-sendeth` skips the
+build when an executable is already available.
+
+All commands and combined stdout/stderr logs, individual measurements, and the
+final summary are written to `--filename` and displayed in the terminal. The
+runner also preserves each replay's JSON metrics and a machine-readable
+`summary.json` under `<filename>.runs/`. Choose a new filename for another batch;
+existing reports are preserved. A failed run stops the batch, returns a nonzero
+exit status, and identifies any summary as covering only completed runs.
+
+- Average throughput is the arithmetic mean of the replay `txns_per_sec` values.
+- OCC attempt abort rate is `100 * validation_failures / attempts`, including
+  attempts discarded before successful retries. Both the mean per-run rate and
+  the pooled rate across all attempts are reported. FAFO's abort rate is N/A.
+- Total CPU utilization is `100 * sum(user + system CPU seconds) / sum(wall
+  seconds)` for the measured replay commands and their waited-for descendants.
+  This has the same scope as `/usr/bin/time` around the binary: it includes
+  database copying, ADS initialization, replay and the final flush. Build,
+  reference initialization and workload generation are excluded. A result of
+  1600% means an average of 16 logical CPUs busy; it is not normalized to the
+  machine's CPU count. Total CPU seconds and average logical CPUs busy are also
+  reported. No benchmark instrumentation is added by this runner.
+
+The runner uses only Python's standard library and requires Linux/WSL. Its tests
+can be run with `python3 -m unittest discover -s bench-sendeth/tests -v`.
+
 Metrics are recorded with [`metrics`](https://docs.rs/metrics) and written as a
 pretty-printed JSON.  When using `run.sh` the file ends up in
 `$DB_DIR/exepipe_bencheth/<…>/metrics/*.json` and includes:
