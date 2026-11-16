@@ -18,6 +18,21 @@ impl LockTimings {
     }
 }
 
+/// Persistence sums overlap the scheduler in background mode. Enqueue is a
+/// subset of callback time; drain is a subset of finalize time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PersistenceTimings {
+    pub worker_ns: u64,
+    pub code_ns: u64,
+    pub task_ns: u64,
+    pub task_build_ns: u64,
+    pub prefetch_ns: u64,
+    pub updater_ns: u64,
+    pub cleanup_ns: u64,
+    pub enqueue_ns: u64,
+    pub drain_ns: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OccTimings {
     pub block_ns: u64,
@@ -25,6 +40,7 @@ pub struct OccTimings {
     pub scheduler_ns: u64,
     pub finalize_ns: u64,
     pub compaction_ns: u64,
+    pub persistence: PersistenceTimings,
     pub coordinator_result_wait_ns: u64,
     pub coordinator_submit_ns: u64,
     pub coordinator_retry_ns: u64,
@@ -32,9 +48,9 @@ pub struct OccTimings {
     pub coordinator_other_ns: u64,
     pub coordinator_validation: LockTimings,
     pub coordinator_publication: LockTimings,
-    /// Summed across workers, including snapshots and rejected attempts.
+    /// Summed across workers, including rejected attempts.
     pub worker_reads: LockTimings,
-    /// Read locks taken during coordinator retries, including snapshot capture.
+    /// Read locks taken during coordinator retries, snapshot capture is lock-free.
     pub retry_reads: LockTimings,
     /// Summed worker attempt wall time; overlaps coordinator and other workers.
     pub worker_attempt_ns: u64,
@@ -42,8 +58,17 @@ pub struct OccTimings {
 
 impl OccTimings {
     /// Additive measurements; `_ns` values are nanoseconds, others are counts.
-    pub fn measurements(&self) -> [(&'static str, u64); 23] {
+    pub fn measurements(&self) -> [(&'static str, u64); 32] {
         [
+            ("persistence_worker_ns", self.persistence.worker_ns),
+            ("persistence_code_ns", self.persistence.code_ns),
+            ("persistence_task_ns", self.persistence.task_ns),
+            ("persistence_task_build_ns", self.persistence.task_build_ns),
+            ("persistence_prefetch_ns", self.persistence.prefetch_ns),
+            ("persistence_updater_ns", self.persistence.updater_ns),
+            ("persistence_cleanup_ns", self.persistence.cleanup_ns),
+            ("persistence_enqueue_ns", self.persistence.enqueue_ns),
+            ("persistence_drain_ns", self.persistence.drain_ns),
             ("block_ns", self.block_ns),
             ("setup_ns", self.setup_ns),
             ("scheduler_ns", self.scheduler_ns),

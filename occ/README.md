@@ -78,11 +78,16 @@ An explicit `--output` still selects the requested metrics file in either mode.
 OCC statistics use `occ.*`; common throughput/duration metrics keep their names.
 Final OCC executor errors fail the benchmark; EVM reverts remain normal results.
 
-The default allocation is 101 speculative workers plus the calling coordinator:
-102 scheduler threads, matching the original FAFO scheduler's peak total
+The default allocation is 100 speculative workers, one ordered persistence
+worker, and the calling coordinator: 102 scheduler threads, matching the
+original FAFO scheduler's peak total
 (64 execution, 16 simulation, 12 warmup, four scanners, four simulator shards,
 one framer, and one coordinator). Shared QMDB/CodeDB workers are additional.
 `OccConfig::with_thread_budget(total)` changes that total without altering FAFO.
+`workers` remains the background-thread budget; one slot is reserved for
+persistence when it is at least two. With `workers = 1`, persistence runs inline
+on the coordinator and the single execution worker remains available.
+`execution_workers()` and `persistence_workers()` expose the allocation.
 Use the same process affinity/container limits for later comparisons. This
 crate does not alter CPU affinity or impose a memory quota on either executor.
 
@@ -107,19 +112,30 @@ The scheduler breakdown separates ordered-result waits, job submission,
 validation lock acquisition and hold/work time, publication lock acquisition
 and hold/work time, synchronous retries, and commit callbacks. Unattributed
 scheduler time includes bookkeeping, measurement overhead and scoped-worker
-teardown. Retry time includes its snapshot reads, execution, conversion and
-discard of the old attempt; retry read-lock times are subsets of that total.
+teardown. Retry time includes snapshot reads, execution and conversion;
+retry read-lock times are subsets of that total. Rejected-attempt destruction
+and accepted read-set cleanup run on the persistence worker.
 Worker attempt wall times include snapshot acquisition and execution and are
 summed across workers, so they overlap each other and coordinator time.
 
 Lock acquisition time includes uncontended lock overhead and scheduling delays;
 it does not count only contended acquisitions. Hold time includes all operations
-performed while holding the guard, including base reads and account decoding.
+performed while holding the guard, including base reads. Account decoding and
+bytecode lookup run after releasing the value shard guard. Lock counts now count
+individual shard acquisitions, not transactions. Snapshot capture takes no lock.
 It is wall time, not thread CPU time. Compaction is a subset of block finalize
 time. Result destruction is timed by the adapter after `run_block` returns;
 final flush is also outside block timing. Setup includes QMDB block admission
 and durability pruning. These counters do not include database copying or ADS
 construction, unlike the external CPU-utilization measurement.
+
+Persistence timings separate queue-send time (a subset of callback time), final
+worker drain (a subset of finalize time), CodeDB writes, task build/registration,
+previous-entry prefetch, updater submission, and retired-attempt cleanup.
+Persistence-worker sums overlap the scheduler in background mode; do not add
+them to block time. Queue-send time includes both channel overhead and any
+backpressure. The report helper also reads older timing files, but rejects
+mixing files from the old and new pipeline in one report.
 
 See `bench-sendeth/readme.md` for commands and the timing report helper.
 
@@ -131,9 +147,21 @@ is discarded and reexecuted against the current committed state while later
 commits wait, ensuring progress. Failed attempts are validated too: a previous
 transfer may make an initially missing or underfunded caller valid.
 
-Accepted writes publish atomically to the versioned overlay; created bytecode
-and QMDB changes are submitted only after validation. Storage deletions retain
-versioned tombstones. Old snapshot versions are reclaimed after workers finish.
+The overlay has 512 independently locked shards using FAFO's byte-cache
+partitioning. The sole publisher installs every accepted write and immutable
+bytecode, then advances an atomic committed-version watermark. Attempts keep
+the snapshot captured at worker start; a partially installed later publication
+remains invisible. Baseline values are installed before persistence can alter
+QMDB. Validation still checks actual full-key versions in input order.
+
+Accepted batches enter a bounded FIFO persistence queue after publication.
+The reserved worker appends bytecode, registers the original QMDB task, fetches
+previous entries, and submits it to the updater in the same task order. The
+queue holds at most `ceil(window / persistence_batch_size)` batches (at least
+one), plus the batch in progress. The worker is joined before end-block
+submission, compaction, or return, including when scheduling fails. The final
+flush still drains QMDB. Created bytecode and QMDB changes are submitted only
+after validation. Storage deletions retain versioned tombstones. Old snapshot versions are reclaimed after workers finish.
 Latest values remain available across blocks while QMDB catches up, then their
 overlay entries are removed when QMDB reports those blocks complete. `flush`
 drains storage and releases the remaining overlay. Give OCC exclusive ownership
@@ -143,6 +171,15 @@ Validation/retry granularity is one transaction. Persistence batches up to four
 finalized transactions per task by default, using the original `ExeTask` as a
 change-set container. `persistence_batch_size` changes only storage batching.
 `workers = 1, window = 1` is a sequential reference using the same semantics.
+Result mailboxes are reused across the submission window; their allocation
+count depends on the window rather than the number of transactions. Compaction
+reuses history allocations within the overlay; final flush releases the maps.
+
+Retries remain synchronous to guarantee progress in input order. Dispatching a
+retry and immediately waiting for it would add a handoff without overlapping
+later commits. Scheduling remains per transaction: grouping speculative jobs
+could reduce available parallelism for expensive contracts. REVM context reuse
+is also left unchanged because it requires additional reset/lifetime guarantees.
 
 ## What is reused without modification
 

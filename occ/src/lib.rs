@@ -6,12 +6,13 @@
 //! before measuring completed persistence or reading final roots. The executor
 //! owns its inter-block overlay; callers do not pass FAFO's state cache.
 mod attempt;
+mod persistence;
 mod scheduler;
 mod state;
 mod timing;
 mod tx_context;
 use timing::Clock;
-pub use timing::{LockTimings, OccFlushTimings, OccTimings};
+pub use timing::{LockTimings, OccFlushTimings, OccTimings, PersistenceTimings};
 
 use anyhow::{ensure, Result};
 use codedb::CodeDB;
@@ -33,6 +34,8 @@ use tx_context::Runtime;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OccConfig {
+    /// Background thread budget. With two or more, one is reserved for ordered
+    /// persistence; the rest execute speculative attempts. Caller coordinates.
     pub workers: usize,
     /// Maximum number of transactions submitted but not yet committed.
     pub window: usize,
@@ -51,6 +54,14 @@ impl Default for OccConfig {
 }
 
 impl OccConfig {
+    pub fn execution_workers(&self) -> usize {
+        self.workers.saturating_sub(usize::from(self.workers > 1))
+    }
+
+    pub fn persistence_workers(&self) -> usize {
+        usize::from(self.workers > 1)
+    }
+
     /// Includes the calling coordinator; shared storage threads are additional.
     /// The default 102 matches the original FAFO scheduler's peak allocation.
     pub fn with_thread_budget(total: usize) -> Result<Self> {
@@ -127,7 +138,7 @@ impl OccExecutor {
                 256 * 1024 * 1024,
             )),
             pool: ThreadPoolBuilder::new()
-                .num_threads(config.workers)
+                .num_threads(config.execution_workers())
                 .build()?,
             config,
             state: Arc::new(VersionedState::default()),
@@ -211,35 +222,47 @@ impl OccExecutor {
         };
         let mut results = Vec::with_capacity(transactions.len());
         let mut pending_changes = Vec::with_capacity(batch_size);
+        let mut pending_codes = Vec::new();
+        let mut retired = Vec::with_capacity(batch_size);
         let setup_ns = block_clock.elapsed_ns();
-        let mut stats = scheduler::run(
-            &runtime,
-            &transactions,
-            &self.pool,
-            self.config.window,
-            |index, attempt| {
-                if let Some((change_set, _, _, codes, _, _)) = attempt.output.1 {
-                    for (address, code) in codes {
-                        self.code_db.append(
-                            &address,
-                            code,
-                            join_task_id(height, index / batch_size, false),
-                        )?;
-                    }
-                    pending_changes.push(change_set);
-                }
-                if (index + 1) % batch_size == 0 || index + 1 == transactions.len() {
-                    Self::send_task(
-                        &runtime.ads,
-                        &manager,
-                        height,
-                        index / batch_size,
-                        false,
-                        std::mem::replace(&mut pending_changes, Vec::with_capacity(batch_size)),
-                    );
-                }
-                results.push(attempt.output.0);
-                Ok(())
+        let (mut stats, persistence_timing) = persistence::run(
+            &runtime.ads,
+            &self.code_db,
+            &manager,
+            height,
+            self.config.persistence_workers() > 0,
+            self.config.window.div_ceil(batch_size),
+            self.timings_enabled,
+            |send| {
+                scheduler::run(
+                    &runtime,
+                    &transactions,
+                    &self.pool,
+                    self.config.window,
+                    |index, attempt, rejected| {
+                        if let Some((change_set, _, _, codes, _, _)) = attempt.output.1 {
+                            pending_codes.extend(codes);
+                            pending_changes.push(change_set);
+                        }
+                        retired.push((attempt.reads, rejected));
+                        if (index + 1) % batch_size == 0 || index + 1 == transactions.len() {
+                            send(persistence::Batch {
+                                index: index / batch_size,
+                                changes: std::mem::replace(
+                                    &mut pending_changes,
+                                    Vec::with_capacity(batch_size),
+                                ),
+                                codes: std::mem::take(&mut pending_codes),
+                                retired: std::mem::replace(
+                                    &mut retired,
+                                    Vec::with_capacity(batch_size),
+                                ),
+                            })?;
+                        }
+                        results.push(attempt.output.0);
+                        Ok(())
+                    },
+                )
             },
         )?;
         let finalize_clock = Clock::start(self.timings_enabled);
@@ -264,9 +287,10 @@ impl OccExecutor {
         self.last_height = height;
         self.poisoned = false;
         if let Some(timing) = stats.timings.as_mut() {
+            timing.persistence = persistence_timing;
             timing.setup_ns = setup_ns;
             timing.compaction_ns = compaction_ns;
-            timing.finalize_ns = finalize_clock.elapsed_ns();
+            timing.finalize_ns = finalize_clock.elapsed_ns() + persistence_timing.drain_ns;
             timing.block_ns = block_clock.elapsed_ns();
         }
         Ok(OccBlockResult { results, stats })
@@ -280,13 +304,39 @@ impl OccExecutor {
         end_block: bool,
         changes: Vec<qmdb::utils::changeset::ChangeSet>,
     ) {
+        Self::send_task_with_timings(ads, manager, height, index, end_block, changes, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_task_with_timings<T: ADS>(
+        ads: &T,
+        manager: &TasksManager<ExeTask>,
+        height: i64,
+        index: usize,
+        end_block: bool,
+        changes: Vec<qmdb::utils::changeset::ChangeSet>,
+        mut timing: Option<&mut PersistenceTimings>,
+    ) {
+        let enabled = timing.is_some();
+        let build_clock = Clock::start(enabled);
         // QMDB only needs Task::get_change_sets; transaction results stay above.
         let mut task = ExeTask::new(Vec::new());
         task.set_change_sets(Arc::new(changes));
         manager.set_task(index, task);
         let task_id = join_task_id(height, index, end_block);
+        if let Some(timing) = timing.as_mut() {
+            timing.task_build_ns += build_clock.elapsed_ns();
+        }
+        let prefetch_clock = Clock::start(enabled);
         ads.fetch_prev_entries(task_id);
+        if let Some(timing) = timing.as_mut() {
+            timing.prefetch_ns += prefetch_clock.elapsed_ns();
+        }
+        let updater_clock = Clock::start(enabled);
         ads.add_task_to_updater(task_id);
+        if let Some(timing) = timing.as_mut() {
+            timing.updater_ns += updater_clock.elapsed_ns();
+        }
     }
 
     /// Drain QMDB and code writes, then release the inter-block state overlay.

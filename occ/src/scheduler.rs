@@ -1,39 +1,33 @@
 use super::attempt::{execute, Attempt};
-use super::timing::{Clock, LockTimings, OccTimings};
+use super::timing::{Clock, OccTimings};
 use super::tx_context::Runtime;
 use super::OccStats;
 use crate::exetask::Tx;
 use anyhow::{anyhow, Result};
-use crossbeam::channel::{bounded, Receiver};
+use crossbeam::channel::{bounded, Sender};
 use qmdb::ADS;
 use rayon::{Scope, ThreadPool};
-use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn submit<'scope, T: ADS>(
     scope: &Scope<'scope>,
     runtime: &'scope Runtime<T>,
     tx: &'scope Tx,
-) -> Receiver<Result<Attempt>> {
-    let (sender, receiver) = bounded(1);
+    sender: &'scope Sender<Result<Attempt>>,
+) {
     scope.spawn(move |_| {
         // Begin the read phase when a worker actually starts, rather than
         // making queued work stale before it has had CPU time to execute.
         let result = catch_unwind(AssertUnwindSafe(|| {
             let clock = Clock::start(runtime.timings_enabled);
-            let mut snapshot_timing = runtime.timings_enabled.then(LockTimings::default);
-            let snapshot = runtime.state.version_timed(snapshot_timing.as_mut());
+            let snapshot = runtime.state.version();
             let mut attempt = execute(runtime, tx, snapshot);
             attempt.worker_ns = clock.elapsed_ns();
-            if let Some(reads) = attempt.read_timing.as_mut() {
-                reads.merge(snapshot_timing.unwrap());
-            }
             attempt
         }))
         .map_err(|_| anyhow!("OCC speculative worker panicked"));
         let _ = sender.send(result);
     });
-    receiver
 }
 
 /// Parallel execution with one ordered validator/publisher. A stale head is
@@ -47,21 +41,30 @@ pub(crate) fn run<T: ADS, F>(
     mut committed: F,
 ) -> Result<OccStats>
 where
-    F: FnMut(usize, Attempt) -> Result<()> + Send,
+    F: FnMut(usize, Attempt, Option<Attempt>) -> Result<()> + Send,
 {
     // Keep the blocking coordinator on the calling thread, leaving every pool
     // worker available (including configurations with a single worker).
     let scheduler_clock = Clock::start(runtime.timings_enabled);
+    // One mailbox per outstanding slot, reused after its result is consumed.
+    // This bounds allocations by window size instead of transaction count.
+    let slots: Vec<_> = (0..transactions.len().min(window))
+        .map(|_| bounded(1))
+        .collect();
     let mut stats = pool.in_place_scope(|scope| {
         let mut stats = OccStats {
             timings: runtime.timings_enabled.then(OccTimings::default),
             ..OccStats::default()
         };
-        let mut pending = VecDeque::new();
         let mut next = 0;
         let submit_clock = Clock::start(runtime.timings_enabled);
         while next < transactions.len().min(window) {
-            pending.push_back(submit(scope, runtime, &transactions[next]));
+            submit(
+                scope,
+                runtime,
+                &transactions[next],
+                &slots[next % slots.len()].0,
+            );
             next += 1;
         }
         if let Some(timing) = stats.timings.as_mut() {
@@ -69,9 +72,8 @@ where
         }
         for (index, tx) in transactions.iter().enumerate() {
             let wait_clock = Clock::start(runtime.timings_enabled);
-            let mut attempt = pending
-                .pop_front()
-                .unwrap()
+            let mut attempt = slots[index % slots.len()]
+                .1
                 .recv()
                 .map_err(|_| anyhow!("OCC worker disconnected"))??;
             if let Some(timing) = stats.timings.as_mut() {
@@ -82,6 +84,7 @@ where
                     .merge(attempt.read_timing.take().unwrap());
             }
             stats.attempts += 1;
+            let mut rejected = None;
             if !runtime.state.validate_timed(
                 &attempt.reads,
                 stats
@@ -91,12 +94,13 @@ where
             ) {
                 stats.validation_failures += 1;
                 let retry_clock = Clock::start(runtime.timings_enabled);
-                let mut snapshot_timing = runtime.timings_enabled.then(LockTimings::default);
-                let snapshot = runtime.state.version_timed(snapshot_timing.as_mut());
-                attempt = execute(runtime, tx, snapshot);
+                let snapshot = runtime.state.version();
+                rejected = Some(std::mem::replace(
+                    &mut attempt,
+                    execute(runtime, tx, snapshot),
+                ));
                 if let Some(timing) = stats.timings.as_mut() {
                     timing.coordinator_retry_ns += retry_clock.elapsed_ns();
-                    timing.retry_reads.merge(snapshot_timing.unwrap());
                     timing
                         .retry_reads
                         .merge(attempt.read_timing.take().unwrap());
@@ -126,13 +130,18 @@ where
                 stats.errors += 1;
             }
             let callback_clock = Clock::start(runtime.timings_enabled);
-            committed(index, attempt)?;
+            committed(index, attempt, rejected)?;
             if let Some(timing) = stats.timings.as_mut() {
                 timing.coordinator_callback_ns += callback_clock.elapsed_ns();
             }
             if next < transactions.len() {
                 let submit_clock = Clock::start(runtime.timings_enabled);
-                pending.push_back(submit(scope, runtime, &transactions[next]));
+                submit(
+                    scope,
+                    runtime,
+                    &transactions[next],
+                    &slots[next % slots.len()].0,
+                );
                 next += 1;
                 if let Some(timing) = stats.timings.as_mut() {
                     timing.coordinator_submit_ns += submit_clock.elapsed_ns();

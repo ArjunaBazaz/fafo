@@ -31,7 +31,8 @@ timing boundaries:
 The Rust CLI also accepts `--executor fafo|occ` with `replay-workload`.
 FAFO retains its original execution loop and metrics. A thin
 [`occ_adapter.rs`](src/common/occ_adapter.rs) calls the isolated OCC executor;
-it uses 101 workers plus the coordinator, matching FAFO's peak scheduler thread
+it uses 100 execution workers, one persistence worker, and the coordinator,
+matching FAFO's peak scheduler thread
 budget. Both use the same QMDB/CodeDB settings and process CPU limits.
 OCC uses a separate `_run_occ` database copy and `occ_` metrics filename prefix;
 its scheduler statistics are under `occ.*`. Common duration and throughput
@@ -232,8 +233,9 @@ baseline measurements.
 Interpret the scheduler breakdown as follows:
 
 - High publication **lock acquisition** time means the coordinator is delayed
-  acquiring the global write lock. Examine worker read-lock hold times too:
-  the existing read guard includes underlying database reads.
+  acquiring a write lock for a touched overlay shard. Examine worker read-lock
+  hold times too: a shard read guard includes underlying database reads.
+  Snapshot capture itself is lock-free; lock counts now count shard acquisitions.
 - High validation/publication **work while holding the lock**, callback or job
   submission time indicates serialized coordinator work. Work under the write
   lock also delays workers, so both effects can occur together.
@@ -241,6 +243,12 @@ Interpret the scheduler breakdown as follows:
   delays at the front of the commit order. Worker read-lock acquisition times
   help distinguish lock stalls from other worker costs.
 - Retry time includes retry read locks, execution and change-set conversion.
+  Rejected-attempt cleanup now runs on the ordered persistence worker.
+- Persistence stages show queue-send/backpressure (included in callbacks), final
+  worker drain (included in finalize), CodeDB appends, task registration, prefetch,
+  updater submission, and metadata cleanup. Worker work overlaps the scheduler;
+  these rows are not additional block phases. High queue-send time suggests
+  persistence cannot keep up with accepted batches.
   Compaction, result destruction and final flush are reported separately.
 
 These are wall-clock timings, including possible descheduling. Acquisition

@@ -9,11 +9,15 @@ import sys
 
 def report(paths):
     totals = {}
+    layouts = set()
     for path in paths:
         with path.open(encoding="utf-8") as source:
             metrics = json.load(source)["metrics"]
         if "occ.timing.block_ns" not in metrics:
             raise ValueError(f"{path}: no OCC timings; rebuild and run with OCC_TIMINGS=1")
+        layouts.add("occ.timing.persistence_worker_ns" in metrics)
+        if len(layouts) > 1:
+            raise ValueError("cannot mix timings from before and after the OCC pipeline change")
         for name, item in metrics.items():
             if name.startswith("occ.timing."):
                 value = float(item["value"])
@@ -64,6 +68,22 @@ def report(paths):
     print(f"Retry read-lock acquisitions: {int(value('retry_read_lock_count'))}")
     print(f"Validation acquisitions: {int(value('coordinator_validation_count'))}; "
           f"publication acquisitions: {int(value('coordinator_publish_count'))}")
+    if "persistence_worker_ns" in totals:
+        print("\nPersistence stages overlap the scheduler when the background worker is enabled.")
+        print("Queue send is included in callback time; final drain is included in finalize time.")
+        for label, key in (
+            ("Queue send (includes backpressure)", "persistence_enqueue_ns"),
+            ("Final persistence-worker drain", "persistence_drain_ns"),
+            ("Persistence work total", "persistence_worker_ns"),
+            ("  CodeDB append", "persistence_code_ns"),
+            ("  QMDB task submission total", "persistence_task_ns"),
+            ("    Build / register task", "persistence_task_build_ns"),
+            ("    Fetch previous entries", "persistence_prefetch_ns"),
+            ("    Submit to updater", "persistence_updater_ns"),
+            ("  Retired-attempt cleanup", "persistence_cleanup_ns"),
+        ):
+            row(label, key)
+        print("Lock counts now count shard acquisitions; snapshot capture is lock-free.")
     print("\nOutside run_block (final flush includes QMDB, code and overlay cleanup):")
     for label, key in (
         ("Result destruction", "result_drop_ns"),

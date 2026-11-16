@@ -151,7 +151,7 @@ fn speculative_failures_retry_and_match_serial_execution() {
             let mut indices = Vec::new();
             let stale_failure = execute(&r, &txs[1], r.state.version());
             assert!(stale_failure.output.0.is_err());
-            let stats = scheduler::run(&r, &txs, &pool, window, |index, attempt| {
+            let stats = scheduler::run(&r, &txs, &pool, window, |index, attempt, _| {
                 assert!(attempt.output.0.unwrap().result.is_success());
                 indices.push(index);
                 Ok(())
@@ -196,7 +196,7 @@ fn independent_transfers_do_not_retry() {
         &[transfer(100, 101, 1), transfer(102, 103, 1)],
         &pool,
         2,
-        |_, a| {
+        |_, a, _| {
             assert!(a.output.0.is_ok());
             Ok(())
         },
@@ -244,7 +244,7 @@ fn contract_storage_is_private_until_commit_and_revalidated() {
     let (_, unchanged) = r.state.read(&r.ads, 1, 0, &hash, &key);
     assert_eq!(unchanged.unwrap().as_ref(), value.as_slice());
     let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
-    let stats = scheduler::run(&r, &[first, second], &pool, 2, |_, a| {
+    let stats = scheduler::run(&r, &[first, second], &pool, 2, |_, a, _| {
         assert!(a.output.0.unwrap().result.is_success());
         Ok(())
     })
@@ -264,9 +264,9 @@ fn empty_blocks_and_final_errors_are_supported() {
     let temp = tempfile::tempdir().unwrap();
     let r = runtime(MockADS::new(), temp.path().to_str().unwrap());
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    let stats = scheduler::run(&r, &[], &pool, 1, |_, _| unreachable!()).unwrap();
+    let stats = scheduler::run(&r, &[], &pool, 1, |_, _, _| unreachable!()).unwrap();
     assert_eq!(stats, OccStats::default());
-    let stats = scheduler::run(&r, &[transfer(100, 101, 1)], &pool, 1, |_, a| {
+    let stats = scheduler::run(&r, &[transfer(100, 101, 1)], &pool, 1, |_, a, _| {
         assert!(matches!(a.output.0, Err(ExecutionError::CallerNotFound(_))));
         Ok(())
     })
@@ -296,7 +296,7 @@ fn reverted_contract_changes_are_not_published() {
     let r = runtime(ads, temp.path().to_str().unwrap());
     r.code_db.append(&contract, code, 0).unwrap();
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    scheduler::run(&r, &[transfer(100, 200, 0)], &pool, 1, |_, a| {
+    scheduler::run(&r, &[transfer(100, 200, 0)], &pool, 1, |_, a, _| {
         assert!(matches!(
             a.output.0.unwrap().result,
             revm::context::result::ExecutionResult::Revert { .. }
@@ -382,15 +382,9 @@ fn persisted_run(workers: usize, window: usize, timings_enabled: bool) -> Vec<[u
     if let Some(timing) = result.stats.timings {
         assert!(timing.block_ns >= timing.setup_ns + timing.scheduler_ns + timing.finalize_ns);
         assert!(timing.finalize_ns >= timing.compaction_ns);
-        assert_eq!(
-            timing.coordinator_validation.acquisitions,
-            result.stats.attempts as u64
-        );
-        assert_eq!(
-            timing.coordinator_publication.acquisitions,
-            result.stats.applied as u64
-        );
-        assert!(timing.worker_reads.acquisitions >= result.stats.finalized as u64 * 2);
+        assert!(timing.coordinator_validation.acquisitions >= result.stats.attempts as u64);
+        assert!(timing.coordinator_publication.acquisitions >= result.stats.applied as u64);
+        assert!(timing.worker_reads.acquisitions >= result.stats.finalized as u64);
         assert!(
             timing.worker_attempt_ns >= timing.worker_reads.wait_ns + timing.worker_reads.hold_ns
         );
@@ -416,9 +410,12 @@ fn persisted_run(workers: usize, window: usize, timings_enabled: bool) -> Vec<[u
     if let Some(timing) = flush {
         assert!(timing.total_ns >= timing.qmdb_ns + timing.code_ns + timing.overlay_clear_ns);
     }
-    executor
-        .run_block(vec![vec![transfer(101, 102, 1)]], block(5))
-        .unwrap();
+    let mut transfers = vec![transfer(101, 102, 1)];
+    transfers.extend((0..17).map(|_| transfer(101, 102, 0)));
+    let result = executor.run_block(vec![transfers], block(5)).unwrap();
+    assert_eq!(result.stats.finalized, 18);
+    assert_eq!(result.stats.persistence_tasks, 5); // includes a partial batch
+
     executor.flush().unwrap();
     for (id, balance) in [(100, 92), (101, 6), (102, 2)] {
         let mut buf = ReadBuf::new();
@@ -458,14 +455,14 @@ fn optional_timings_include_failed_speculative_reads() {
     let mut r = runtime(MockADS::new(), temp.path().to_str().unwrap());
     r.timings_enabled = true;
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    let stats = scheduler::run(&r, &[transfer(100, 101, 1)], &pool, 1, |_, a| {
+    let stats = scheduler::run(&r, &[transfer(100, 101, 1)], &pool, 1, |_, a, _| {
         assert!(a.output.0.is_err());
         Ok(())
     })
     .unwrap();
     assert_eq!(stats.errors, 1);
     let timing = stats.timings.unwrap();
-    assert_eq!(timing.worker_reads.acquisitions, 2); // snapshot plus missing caller
+    assert_eq!(timing.worker_reads.acquisitions, 1); // missing caller; snapshot is lock-free
     assert_eq!(timing.coordinator_validation.acquisitions, 1);
     assert_eq!(timing.coordinator_publication.acquisitions, 0);
 }
@@ -494,7 +491,7 @@ fn created_bytecode_remains_private_until_validation() {
         .1
         .is_none());
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    scheduler::run(&r, &[tx], &pool, 1, |_, a| {
+    scheduler::run(&r, &[tx], &pool, 1, |_, a, _| {
         assert!(a.output.0.is_ok());
         Ok(())
     })
@@ -574,4 +571,46 @@ fn native_change_sets_match_the_unchanged_fafo_executor() {
         operations(&original_effects.unwrap().0),
         operations(&occ.output.1.unwrap().0)
     );
+}
+
+#[test]
+fn persistence_reservation_keeps_the_original_thread_budget() {
+    for total in [2, 3, 8, 102] {
+        let config = OccConfig::with_thread_budget(total).unwrap();
+        assert_eq!(
+            config.execution_workers() + config.persistence_workers() + 1,
+            total
+        );
+        assert!(config.execution_workers() > 0);
+    }
+    assert_eq!(OccConfig::default().execution_workers(), 100);
+    assert_eq!(OccConfig::default().persistence_workers(), 1);
+}
+
+#[test]
+fn reused_mailboxes_preserve_order_and_drain_on_callback_error() {
+    let temp = tempfile::tempdir().unwrap();
+    for window in [1, 3, 7] {
+        let mut ads = MockADS::new();
+        ads.add_account(&address(100), &AccountInfo::from_balance(U256::from(1000)));
+        let r = runtime(ads, temp.path().to_str().unwrap());
+        let txs: Vec<_> = (0..99).map(|_| transfer(100, 101, 1)).collect();
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let mut next = 0;
+        let stats = scheduler::run(&r, &txs, &pool, window, |index, a, _| {
+            assert_eq!(index, next);
+            next += 1;
+            assert!(a.output.0.is_ok());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(stats.finalized, 99);
+        assert_eq!(account(&r, 100).unwrap().balance, U256::from(901));
+        assert_eq!(account(&r, 101).unwrap().balance, U256::from(99));
+        let error = scheduler::run(&r, &txs, &pool, window, |_, _, _| {
+            anyhow::bail!("intentional callback failure")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("intentional callback failure"));
+    }
 }
