@@ -1,5 +1,32 @@
 # bench-sendeth
 
+For a metrics-only contention sweep (ETH, hotn, skew 10), run:
+
+```bash
+python3 bench-sendeth/run_contention_sweep.py \
+  --executor occ --size medium \
+  --db-dir /mnt/ssd/fafo-benchmark-data \
+  --filename results/occ-medium-sweep.csv
+```
+
+Select `fafo` or `occ`, and `fast`, `medium`, or `full`. The script builds release
+once unless `--binary /path/to/bench-sendeth` is supplied. It reuses the existing
+runner to initialize a missing reference database, prepare each workload, and
+replay contention levels 0.1 through 0.6 twice each. Diagnostics are disabled.
+
+The CSV contains six rows with executor, size, contention, run count, mean CPU
+utilization percentage, mean throughput in transactions/second, and (for OCC)
+mean attempt abort percentage. Each mean is the arithmetic average of the two
+per-run measurements. CPU utilization includes replay-command database copying,
+ADS initialization, execution and final flush; build, reference initialization
+and workload generation are excluded. CPU utilization can exceed 100% on
+multiple cores. OCC abort percentage is validation failures divided by attempts.
+
+Raw command logs and individual metrics are temporary; only the requested CSV
+is retained. Existing output files are refused. If a run fails, completed
+contention levels remain in the CSV and recent logs are printed to stderr;
+incomplete pairs are not averaged.
+
 `bench-sendeth` is a synthetic workload generator and replay harness used to
 benchmark **FAFO** (the default) or **OCC**.  It can:
 
