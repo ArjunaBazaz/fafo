@@ -1,6 +1,7 @@
 """Exercise the metrics-only sweep through the real repeated-run pipeline."""
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -38,38 +39,47 @@ class ContentionSweepTests(unittest.TestCase):
         self.output = self.root / "averages.csv"
         self.calls = self.root / "calls.jsonl"
 
-    def invoke(self, executor="occ", size="fast", **extra_env):
-        return subprocess.run([
+    def invoke(self, executor="occ", size="fast", skew=None, runs=None, runs_flag="-n", **extra_env):
+        command = [
             sys.executable, "-B", str(SCRIPT), "--executor", executor, "--size", size,
             "--filename", str(self.output), "--db-dir", str(self.root / "database"),
             "--binary", str(self.binary),
-        ], env=dict(os.environ, SWEEP_TEST_CALLS=str(self.calls), OCC_TIMINGS="1", **extra_env),
+        ]
+        if skew is not None:
+            command += ["--skew", str(skew)]
+        if runs is not None:
+            command += [runs_flag, str(runs)]
+        return subprocess.run(command, env=dict(os.environ, SWEEP_TEST_CALLS=str(self.calls), OCC_TIMINGS="1", **extra_env),
             text=True, capture_output=True)
 
     def rows(self):
         with self.output.open(newline="", encoding="utf-8") as source:
             return list(csv.DictReader(source))
 
-    def test_six_levels_two_runs_each_and_no_diagnostic_or_log_output_in_csv(self):
+    def test_ten_levels_two_runs_each_and_no_diagnostic_or_log_output_in_csv(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = self.rows()
-        self.assertEqual([row["contention"] for row in rows], [f"0.{n}" for n in range(1, 7)])
+        self.assertEqual([row["contention"] for row in rows], [f"0.{n}" for n in range(10)])
         for row in rows:
             self.assertEqual(row["runs"], "2")
+            self.assertEqual(row["skew"], "10")
             self.assertEqual(float(row["average_throughput_tx_per_sec"]), 150)
             self.assertEqual(float(row["average_attempt_abort_rate_pct"]), 35)
+            self.assertAlmostEqual(float(row["stddev_throughput_tx_per_sec"]), math.sqrt(5000))
+            self.assertAlmostEqual(float(row["stddev_attempt_abort_rate_pct"]), math.sqrt(450))
             self.assertGreater(float(row["average_cpu_utilization_pct"]), 0)
+            self.assertGreaterEqual(float(row["stddev_cpu_utilization_pct"]), 0)
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertTrue(all(call["timings"] == "0" for call in calls))
         self.assertEqual(sum("init-db" in call["args"] for call in calls), 1)
         prepared = [call["args"] for call in calls if "prepare-workload" in call["args"]]
-        self.assertEqual(len(prepared), 6)
-        for index, args in enumerate(prepared, 1):
+        self.assertEqual(len(prepared), 10)
+        for index, args in enumerate(prepared):
             for key, expected in [("--generator", "hotn"), ("--skew", "10.0"),
                                   ("--contention-degree", f"0.{index}"), ("--workload", "eth")]:
                 self.assertEqual(args[args.index(key) + 1], expected)
-        self.assertEqual(sum("replay-workload" in call["args"] for call in calls), 12)
+        self.assertEqual(sum("replay-workload" in call["args"] for call in calls), 20)
         self.assertNotIn("stdout from replay", self.output.read_text())
         self.assertFalse(Path(str(self.output) + ".runs").exists())
 
@@ -80,10 +90,11 @@ class ContentionSweepTests(unittest.TestCase):
                 result = self.invoke("fafo", size)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 rows = self.rows()
-                self.assertEqual(len(rows), 6)
+                self.assertEqual(len(rows), 10)
                 self.assertEqual(rows[0]["executor"], "fafo")
                 self.assertEqual(rows[0]["size"], size)
                 self.assertNotIn("average_attempt_abort_rate_pct", rows[0])
+                self.assertNotIn("stddev_attempt_abort_rate_pct", rows[0])
                 calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
                 self.assertEqual(calls[-1][calls[-1].index("--entry-count-bits") + 1], bits)
 
@@ -93,6 +104,69 @@ class ContentionSweepTests(unittest.TestCase):
         self.assertEqual(self.rows(), [])
         self.assertIn("exit status 7", result.stderr)
         self.assertNotIn("Saved averaged metrics", result.stdout)
+
+    def test_custom_skew_is_forwarded_to_every_workload_and_recorded(self):
+        for executor, skew in [("occ", 30), ("fafo", 50)]:
+            with self.subTest(executor=executor, skew=skew):
+                self.output = self.root / f"{executor}-{skew}.csv"
+                self.calls.unlink(missing_ok=True)
+                result = self.invoke(executor=executor, skew=skew)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual([row["skew"] for row in self.rows()], [str(skew)] * 10)
+                calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
+                prepared = [args for args in calls if "prepare-workload" in args]
+                self.assertEqual(len(prepared), 10)
+                for args in prepared:
+                    self.assertEqual(float(args[args.index("--skew") + 1]), skew)
+
+    def test_invalid_skew_is_rejected_before_build_or_database_access(self):
+        for skew in [0, -1, "1.5", 262145]:
+            with self.subTest(skew=skew):
+                result = self.invoke(skew=skew)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--skew", result.stderr)
+                self.assertFalse(self.calls.exists())
+                self.assertFalse(self.output.exists())
+
+    def test_custom_run_count_and_sample_deviation_for_both_executors(self):
+        for executor, flag in [("occ", "--n"), ("fafo", "--runs")]:
+            with self.subTest(executor=executor):
+                self.output = self.root / f"{executor}-three-runs.csv"
+                self.calls.unlink(missing_ok=True)
+                result = self.invoke(executor=executor, runs=3, runs_flag=flag)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                rows = self.rows()
+                self.assertEqual(len(rows), 10)
+                for row in rows:
+                    self.assertEqual(row["runs"], "3")
+                    self.assertEqual(float(row["average_throughput_tx_per_sec"]), 200)
+                    # [100, 200, 300]: sample deviation=100, population deviation~81.65.
+                    self.assertEqual(float(row["stddev_throughput_tx_per_sec"]), 100)
+                    if executor == "occ":
+                        self.assertEqual(float(row["average_attempt_abort_rate_pct"]), 40)
+                        self.assertAlmostEqual(float(row["stddev_attempt_abort_rate_pct"]), math.sqrt(300))
+                calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
+                self.assertEqual(sum("replay-workload" in args for args in calls), 30)
+
+    def test_single_run_has_blank_sample_deviations(self):
+        result = self.invoke(runs=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for row in self.rows():
+            self.assertEqual(row["runs"], "1")
+            self.assertEqual(float(row["average_throughput_tx_per_sec"]), 100)
+            for key in ("stddev_cpu_utilization_pct", "stddev_throughput_tx_per_sec",
+                        "stddev_attempt_abort_rate_pct"):
+                self.assertEqual(row[key], "")
+        calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
+        self.assertEqual(sum("replay-workload" in args for args in calls), 10)
+
+    def test_invalid_run_count_is_rejected_before_database_access(self):
+        for runs in [0, -1, "1.5"]:
+            with self.subTest(runs=runs):
+                result = self.invoke(runs=runs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.calls.exists())
+                self.assertFalse(self.output.exists())
 
     def test_existing_output_is_preserved(self):
         self.output.write_text("previous results")

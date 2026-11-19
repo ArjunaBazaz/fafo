@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Average two ETH/hotn/skew-10 runs at each contention level from 0.1 to 0.6.
+"""Report ETH/hotn run means and sample deviations at contention 0.0 through 0.9.
 
 Writes CSV metrics only. Reuses run_benchmarks.py's preparation, replay and CPU
 measurement code; build/init/preparation are outside measured replay commands.
@@ -22,12 +22,22 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executor", choices=("fafo", "occ"), required=True)
     parser.add_argument("--size", choices=("fast", "medium", "full"), required=True)
+    parser.add_argument("--skew", type=int, default=10,
+                        help="number of hot accounts (positive integer; default: 10)")
+    parser.add_argument("-n", "--n", "--runs", dest="runs", type=int, default=2,
+                        help="runs per contention level (positive integer; default: 2)")
     parser.add_argument("--filename", "--output", "-o", type=Path, required=True,
-                        help="new CSV file containing only averaged metrics")
+                        help="new CSV file containing metric means and sample standard deviations")
     parser.add_argument("--db-dir", type=Path, default=Path("/mnt/ssd/fafo-benchmark-data"))
     parser.add_argument("--binary", type=Path,
                         help="use an existing executable; otherwise build release once")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.runs < 1:
+        parser.error("n must be at least 1")
+    account_count = 1 << {"fast": 18, "medium": 26, "full": 30}[args.size]
+    if not 1 <= args.skew <= account_count:
+        parser.error(f"--skew must be between 1 and {account_count} for size {args.size}")
+    return args
 
 
 def build_binary(log, env):
@@ -44,20 +54,29 @@ def build_binary(log, env):
     return Path(json.loads(metadata.stdout)["target_directory"]) / "release" / "bench-sendeth"
 
 
-def averaged_row(report, executor, size, contention):
+def averaged_row(report, executor, size, contention, skew, expected_runs):
     runs = report["runs"]
-    if report["status"] != "complete" or len(runs) != 2:
-        raise ValueError("each contention level requires exactly two completed runs")
+    if report["status"] != "complete" or len(runs) != expected_runs:
+        raise ValueError(f"each contention level requires exactly {expected_runs} completed runs")
+
+    def deviation(key):
+        # Sample standard deviation uses n-1; one observation cannot estimate it.
+        return statistics.stdev(r[key] for r in runs) if len(runs) > 1 else None
+
     row = {
         "executor": executor,
         "size": size,
         "contention": contention,
-        "runs": 2,
+        "runs": len(runs),
+        "skew": skew,
         "average_cpu_utilization_pct": statistics.mean(r["cpu_utilization_pct"] for r in runs),
+        "stddev_cpu_utilization_pct": deviation("cpu_utilization_pct"),
         "average_throughput_tx_per_sec": statistics.mean(r["throughput_tx_per_sec"] for r in runs),
+        "stddev_throughput_tx_per_sec": deviation("throughput_tx_per_sec"),
     }
     if executor == "occ":
         row["average_attempt_abort_rate_pct"] = statistics.mean(r["abort_pct"] for r in runs)
+        row["stddev_attempt_abort_rate_pct"] = deviation("abort_pct")
     return row
 
 
@@ -71,10 +90,11 @@ def main(argv=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, OCC_TIMINGS="0", RUSTFLAGS="-Awarnings", RUST_LOG="info")
     recent = deque(maxlen=40)
-    fields = ["executor", "size", "contention", "runs",
-              "average_cpu_utilization_pct", "average_throughput_tx_per_sec"]
+    fields = ["executor", "size", "contention", "runs", "skew",
+              "average_cpu_utilization_pct", "stddev_cpu_utilization_pct",
+              "average_throughput_tx_per_sec", "stddev_throughput_tx_per_sec"]
     if args.executor == "occ":
-        fields.append("average_attempt_abort_rate_pct")
+        fields.extend(["average_attempt_abort_rate_pct", "stddev_attempt_abort_rate_pct"])
     try:
         # Raw logs and JSON are scratch data, never mixed into the requested CSV.
         with tempfile.TemporaryDirectory(prefix="fafo-contention-sweep-") as scratch:
@@ -101,9 +121,9 @@ def main(argv=None):
                         writer = csv.DictWriter(destination, fieldnames=fields)
                         writer.writeheader()
                         destination.flush()
-                        for step in range(1, 7):
+                        for step in range(10):
                             contention = f"0.{step}"
-                            print(f"{args.executor} / {args.size}: contention={contention}, two runs "
+                            print(f"{args.executor} / {args.size}: contention={contention}, skew={args.skew}, {args.runs} runs "
                                   "(initializing database if needed)...", flush=True)
                             artifacts = scratch / f"contention-{contention}"
                             artifacts.mkdir()
@@ -111,14 +131,15 @@ def main(argv=None):
                                 "--executor", args.executor, "--size", args.size,
                                 "--db-dir", str(args.db_dir.expanduser().resolve()),
                                 "--binary", str(binary), "--token", "eth",
-                                "--generator", "hotn", "--skew", "10",
-                                "--contention-degree", contention, "-n", "2",
+                                "--generator", "hotn", "--skew", str(args.skew),
+                                "--contention-degree", contention, "-n", str(args.runs),
                                 "--filename", str(scratch / "unused.log"),
                             ])
                             if runner.execute(repeat_args, log, artifacts):
                                 raise RuntimeError(f"contention={contention} failed")
                             report = json.loads((artifacts / "summary.json").read_text(encoding="utf-8"))
-                            writer.writerow(averaged_row(report, args.executor, args.size, contention))
+                            writer.writerow(averaged_row(report, args.executor, args.size, contention,
+                                                         args.skew, args.runs))
                             destination.flush()
                 finally:
                     if previous_timings is None:
@@ -134,7 +155,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Sweep interrupted; any completed contention levels remain in the CSV.", file=sys.stderr)
         return 130
-    print(f"Saved averaged metrics: {output}", flush=True)
+    print(f"Saved averaged metrics and standard deviations: {output}", flush=True)
     return 0
 
 

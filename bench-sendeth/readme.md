@@ -1,10 +1,10 @@
 # bench-sendeth
 
-For a metrics-only contention sweep (ETH, hotn, skew 10), run:
+For a metrics-only contention sweep (ETH, hotn), run:
 
 ```bash
 python3 bench-sendeth/run_contention_sweep.py \
-  --executor occ --size medium \
+  --executor occ --size medium --skew 50 -n 5 \
   --db-dir /mnt/ssd/fafo-benchmark-data \
   --filename results/occ-medium-sweep.csv
 ```
@@ -12,11 +12,20 @@ python3 bench-sendeth/run_contention_sweep.py \
 Select `fafo` or `occ`, and `fast`, `medium`, or `full`. The script builds release
 once unless `--binary /path/to/bench-sendeth` is supplied. It reuses the existing
 runner to initialize a missing reference database, prepare each workload, and
-replay contention levels 0.1 through 0.6 twice each. Diagnostics are disabled.
+replay contention levels 0.0 through 0.9 in steps of 0.1. `-n`, `--n`, or `--runs` sets the number
+of runs per level (default: 2, minimum: 1). Diagnostics are disabled.
+`--skew` sets the number of hot accounts and defaults to 10. It must be a positive
+integer no larger than the selected database's account count. Use the same skew
+for FAFO and OCC comparisons. For the full sweep through 0.9, skew 50 provides funding
+headroom with the existing initial balances; skew 10 or 30 can exhaust hot accounts.
 
-The CSV contains six rows with executor, size, contention, run count, mean CPU
+The CSV contains ten rows with executor, size, contention, run count, skew, mean CPU
 utilization percentage, mean throughput in transactions/second, and (for OCC)
-mean attempt abort percentage. Each mean is the arithmetic average of the two
+mean attempt abort percentage. Each metric also has a `stddev_*` column reporting
+the sample standard deviation across runs, using the `n-1` denominator. For one
+run these columns are blank because sample deviation is undefined. Deviations
+use the metric's units: transactions/second for throughput and percentage points
+for CPU utilization and abort rate. Each mean is the arithmetic average of the
 per-run measurements. CPU utilization includes replay-command database copying,
 ADS initialization, execution and final flush; build, reference initialization
 and workload generation are excluded. CPU utilization can exceed 100% on
@@ -25,7 +34,40 @@ multiple cores. OCC abort percentage is validation failures divided by attempts.
 Raw command logs and individual metrics are temporary; only the requested CSV
 is retained. Existing output files are refused. If a run fails, completed
 contention levels remain in the CSV and recent logs are printed to stderr;
-incomplete pairs are not averaged.
+incomplete sets of the requested number of runs are not averaged.
+
+To run OCC then FAFO with RAM-backed replay databases using the same settings:
+
+```bash
+python3 bench-sendeth/run_ram_contention_sweeps.py \
+  --binary "$CARGO_TARGET_DIR/release/bench-sendeth" \
+  --size medium --skew 10 -n 5 \
+  --db-dir /mnt/ssd/fafo-benchmark-data \
+  --ram-dir /dev/shm \
+  --filename /mnt/ssd/abazaz/results/ram-occ-fafo-medium.csv
+```
+
+This separate wrapper reuses `run_contention_sweep.py` unchanged. It defaults to
+medium, skew 10, and five runs per level. Both sweeps cover 0.0 through 0.9, so
+the defaults perform 100 measured replays. The combined CSV has 20 rows, OCC
+first and FAFO second, retaining all means and sample deviations; FAFO's abort
+columns are blank. Existing output files are refused.
+
+`--db-dir` identifies the SSD reference database, initialized if missing. A
+temporary reference symlink points there from each executor's fresh RAM root.
+Writable QMDB/CodeDB replay files reside in RAM. The OCC copy is removed before
+FAFO starts, and all temporary RAM copies are cleaned up afterward. The SSD
+reference and the combined CSV remain. Without `--binary`, release is built
+once before either sweep. Scratch logs/metrics are temporary files beside the
+output report, avoiding a potentially full `/tmp`.
+
+The wrapper checks that `--ram-dir` is on tmpfs or ramfs, and for tmpfs refuses
+to start if even one reference copy will not fit. Allow additional physical
+memory and filesystem space for execution and database growth; this minimum
+capacity check does not guarantee adequate RAM. Monitor `free -h` and `vmstat 1`
+to ensure swapping does not distort the comparison. Completed CSV rows are
+retained on failure, and FAFO is not started if OCC fails. Use skew 50 for full
+sweeps to avoid exhausting hot-account balances at high contention.
 
 `bench-sendeth` is a synthetic workload generator and replay harness used to
 benchmark **FAFO** (the default) or **OCC**.  It can:
