@@ -20,7 +20,7 @@ import run_benchmarks as runner
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--executor", choices=("fafo", "occ"), required=True)
+    parser.add_argument("--executor", choices=("fafo", "occ", "serial"), required=True)
     parser.add_argument("--size", choices=("fast", "medium", "full"), required=True)
     parser.add_argument("--skew", type=int, default=10,
                         help="number of hot accounts (positive integer; default: 10)")

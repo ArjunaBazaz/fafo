@@ -6,6 +6,7 @@ use serde::Serialize;
 pub enum Executor {
     Fafo,
     Occ,
+    Serial,
 }
 
 impl Executor {
@@ -95,6 +96,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn serial_selection_works_before_or_after_replay_subcommand() {
+        for command in [
+            vec![
+                "bench-sendeth",
+                "--workload",
+                "eth",
+                "--executor",
+                "serial",
+                "replay-workload",
+            ],
+            vec![
+                "bench-sendeth",
+                "--workload",
+                "eth",
+                "replay-workload",
+                "--executor",
+                "serial",
+            ],
+        ] {
+            assert_eq!(
+                BenchmarkCli::try_parse_from(command).unwrap().executor,
+                Executor::Serial
+            );
+        }
+    }
+
+    #[test]
     fn executor_selection_and_default_metadata() {
         let default =
             BenchmarkCli::try_parse_from(["bench-sendeth", "--workload", "eth", "replay-workload"])
@@ -126,13 +154,15 @@ mod tests {
             assert_eq!(args.executor, Executor::Occ);
             assert_eq!(serde_json::to_value(args).unwrap()["executor"], "occ");
         }
-        assert!(BenchmarkCli::try_parse_from([
+        let serial = BenchmarkCli::try_parse_from([
             "bench-sendeth",
             "--workload",
             "eth",
             "--executor",
-            "serial"
+            "serial",
         ])
-        .is_err());
+        .unwrap();
+        assert_eq!(serial.executor, Executor::Serial);
+        assert_eq!(serde_json::to_value(serial).unwrap()["executor"], "serial");
     }
 }

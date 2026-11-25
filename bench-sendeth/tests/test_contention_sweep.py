@@ -105,6 +105,24 @@ class ContentionSweepTests(unittest.TestCase):
         self.assertIn("exit status 7", result.stderr)
         self.assertNotIn("Saved averaged metrics", result.stdout)
 
+    def test_serial_sweep_has_ten_levels_and_standard_deviations(self):
+        result = self.invoke(executor="serial", size="medium", skew=10, runs=3)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = self.rows()
+        self.assertEqual([r["contention"] for r in rows], [f"0.{n}" for n in range(10)])
+        for row in rows:
+            self.assertEqual(row["executor"], "serial")
+            self.assertEqual(row["size"], "medium")
+            self.assertEqual(row["skew"], "10")
+            self.assertEqual(row["runs"], "3")
+            self.assertEqual(float(row["average_throughput_tx_per_sec"]), 200)
+            self.assertEqual(float(row["stddev_throughput_tx_per_sec"]), 100)
+            self.assertNotIn("average_attempt_abort_rate_pct", row)
+        calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
+        replays = [args for args in calls if "replay-workload" in args]
+        self.assertEqual(len(replays), 30)
+        self.assertTrue(all(args[args.index("--executor") + 1] == "serial" for args in replays))
+
     def test_custom_skew_is_forwarded_to_every_workload_and_recorded(self):
         for executor, skew in [("occ", 30), ("fafo", 50)]:
             with self.subTest(executor=executor, skew=skew):

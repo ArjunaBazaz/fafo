@@ -163,6 +163,10 @@ fn speculative_failures_retry_and_match_serial_execution() {
             // Actual conflicts depend on when workers start their read phase.
             assert_eq!(stats.attempts, stats.finalized + stats.validation_failures);
             assert!(stats.validation_failures <= 2);
+            if window == 1 {
+                assert_eq!(stats.validation_failures, 0);
+                assert_eq!(stats.attempts, txs.len());
+            }
             assert!(!r.state.validate(&stale_failure.reads));
             outcomes.push(
                 (100..=102)

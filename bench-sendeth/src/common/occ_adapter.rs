@@ -17,12 +17,14 @@ use std::{
 pub enum SelectedExecutor {
     Fafo(ExePipe),
     Occ(OccExecutor),
+    Serial(OccExecutor),
 }
 
 impl SelectedExecutor {
     pub fn new(selection: Executor, ads: AdsWrap<ExeTask>, dir: &str) -> Self {
         match selection {
             Executor::Fafo => Self::Fafo(ExePipe::new(ads, dir)),
+            Executor::Serial => Self::Serial(super::serial_adapter::new(ads, dir)),
             Executor::Occ => {
                 let mut executor =
                     OccExecutor::new(ads, dir, OccConfig::default()).expect("initialize OCC");
@@ -35,6 +37,9 @@ impl SelectedExecutor {
     pub fn insert_code(&mut self, address: &Address, code: Bytecode) {
         match self {
             Self::Fafo(pipe) => pipe.insert_code(address, code),
+            Self::Serial(pipe) => pipe
+                .insert_code(address, code)
+                .expect("initialize serial bytecode"),
             Self::Occ(pipe) => pipe
                 .insert_code(address, code)
                 .expect("initialize OCC bytecode"),

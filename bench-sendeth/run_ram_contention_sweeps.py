@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run matching OCC then FAFO contention sweeps with RAM-backed replay databases.
+"""Run RAM-backed contention sweeps: OCC then FAFO by default, or one selected executor.
 
 The reference database stays on SSD. Each executor gets a fresh temporary RAM
 directory with a reference symlink; only one executor's replay copy is retained
@@ -19,6 +19,8 @@ import run_contention_sweep as sweep
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--executor", choices=("both", "occ", "fafo", "serial"), default="both",
+                        help="executor to sweep; default: both (OCC then FAFO)")
     parser.add_argument("--size", choices=("fast", "medium", "full"), default="medium")
     parser.add_argument("--skew", type=int, default=10)
     parser.add_argument("-n", "--n", "--runs", dest="runs", type=int, default=5)
@@ -97,7 +99,8 @@ def main(argv=None):
                       f"reference file sizes: {reference_bytes / (1024 ** 3):.2f} GiB. "
                       "Allow additional memory for execution and database growth.", flush=True)
                 writer = None
-                for executor in ("occ", "fafo"):
+                executors = ("occ", "fafo") if args.executor == "both" else (args.executor,)
+                for executor in executors:
                     print(f"\nStarting {executor.upper()} RAM sweep: size={args.size}, "
                           f"skew={args.skew}, n={args.runs}", flush=True)
                     # Exiting this context reclaims the previous executor's RAM

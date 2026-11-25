@@ -113,6 +113,8 @@ fn replay_workload(
     let run_dir = token_setup.get_data_dir(&args.db_dir) + "_run";
     let run_dir = if args.executor == cli::Executor::Occ {
         run_dir + "_occ"
+    } else if args.executor == cli::Executor::Serial {
+        run_dir + "_serial"
     } else {
         run_dir
     };
@@ -142,6 +144,10 @@ fn replay_workload(
 
     // Calculate additional metrics based on values
     let values = metrics_recorder.snapshot_values();
+    if args.executor == cli::Executor::Serial {
+        bench_sendeth::common::serial_adapter::report(&values, token_setup.transfer_txn_count);
+        return;
+    }
     if args.executor == cli::Executor::Occ {
         bench_sendeth::common::occ_adapter::report(&values, token_setup.transfer_txn_count);
         return;
@@ -234,6 +240,10 @@ fn main() {
             && matches!(args.command, Some(cli::Command::ReplayWorkload { .. }))
         {
             "occ_"
+        } else if args.executor == cli::Executor::Serial
+            && matches!(args.command, Some(cli::Command::ReplayWorkload { .. }))
+        {
+            "serial_"
         } else {
             ""
         };

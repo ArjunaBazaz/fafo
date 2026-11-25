@@ -24,7 +24,7 @@ set -euo pipefail
 show_help() {
   cat <<EOF
 Usage: $0 [--db-dir DIR] [--size fast|medium|full|BITS] [--token eth|token]
-          [--executor fafo|occ] (default: fafo)
+          [--executor fafo|occ|serial] (default: fafo)
           [--generator simple|static|hotn|none|replay] [--contention-degree X]
           [--skew Y] [--txns-json PATH] [--txn-filter STR]
 
@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$EXECUTOR" in
-  ""|fafo|occ) ;;
-  *) echo "Invalid --executor '$EXECUTOR': expected fafo or occ" >&2; exit 1 ;;
+  ""|fafo|occ|serial) ;;
+  *) echo "Invalid --executor '$EXECUTOR': expected fafo, occ or serial" >&2; exit 1 ;;
 esac
 
 # Map SIZE -> ENTRY_COUNT_BITS

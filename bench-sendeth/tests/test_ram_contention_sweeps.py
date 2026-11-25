@@ -40,7 +40,7 @@ class RamContentionSweepTests(unittest.TestCase):
             '    output = Path(value("--output"))',
             '    if value("--executor") == "fafo":\n'
             '        assert not list(Path(value("--db-dir")).parent.glob("fafo-ram-occ-*"))\n'
-            '    suffix = "_run_occ" if value("--executor") == "occ" else "_run"\n'
+            '    suffix = {"occ": "_run_occ", "serial": "_run_serial", "fafo": "_run"}[value("--executor")]\n'
             '    replay = data.with_name(data.name + suffix)\n'
             '    replay.mkdir(exist_ok=True)\n'
             '    (replay / "marker").write_text("RAM working copy")\n'
@@ -53,13 +53,16 @@ class RamContentionSweepTests(unittest.TestCase):
         self.binary.write_text(source, encoding="utf-8")
         self.binary.chmod(0o755)
 
-    def invoke(self, **extra_env):
-        return subprocess.run([
+    def invoke(self, executor=None, **extra_env):
+        command = [
             sys.executable, "-B", str(SCRIPT), "--binary", str(self.binary),
             "--size", "fast", "--skew", "30", "-n", "2",
             "--db-dir", str(self.root / "ssd"), "--ram-dir", str(self.ram_parent),
             "--filename", str(self.output),
-        ], env=dict(os.environ, RAM_SWEEP_CALLS=str(self.calls), OCC_TIMINGS="1", **extra_env),
+        ]
+        if executor is not None:
+            command += ["--executor", executor]
+        return subprocess.run(command, env=dict(os.environ, RAM_SWEEP_CALLS=str(self.calls), OCC_TIMINGS="1", **extra_env),
             text=True, capture_output=True)
 
     def rows(self):
@@ -97,6 +100,22 @@ class RamContentionSweepTests(unittest.TestCase):
         result = self.invoke(FAFO_REPEAT_TEST_FAIL="2", FAIL_EXECUTOR="fafo")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual([row["executor"] for row in self.rows()], ["occ"] * 10)
+        self.assertEqual(list(self.ram_parent.iterdir()), [])
+        self.assertTrue((self.root / "ssd/exepipe_bencheth/eth_13_5/data").is_dir())
+
+    def test_serial_only_uses_ram_and_does_not_run_occ_or_fafo(self):
+        result = self.invoke(executor="serial")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = self.rows()
+        self.assertEqual(len(rows), 10)
+        self.assertTrue(all(row["executor"] == "serial" for row in rows))
+        self.assertNotIn("average_attempt_abort_rate_pct", rows[0])
+        calls = [json.loads(line)["args"] for line in self.calls.read_text().splitlines()]
+        replays = [args for args in calls if "replay-workload" in args]
+        self.assertEqual(len(replays), 20)
+        for args in replays:
+            self.assertEqual(args[args.index("--executor") + 1], "serial")
+            self.assertTrue(Path(args[args.index("--db-dir") + 1]).is_relative_to(self.ram_parent))
         self.assertEqual(list(self.ram_parent.iterdir()), [])
         self.assertTrue((self.root / "ssd/exepipe_bencheth/eth_13_5/data").is_dir())
 

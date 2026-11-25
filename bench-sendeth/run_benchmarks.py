@@ -29,7 +29,7 @@ def parse_args(argv=None):
     parser.add_argument("--db-dir", default="/tmp/QMDB")
     parser.add_argument("--size", default="medium", help="fast, medium, full, or account-count bits")
     parser.add_argument("--token", choices=("eth", "token"), default="eth")
-    parser.add_argument("--executor", choices=("fafo", "occ"), default="fafo")
+    parser.add_argument("--executor", choices=("fafo", "occ", "serial"), default="fafo")
     parser.add_argument("--generator", choices=("none", "simple", "static", "hotn", "replay"), default="none")
     parser.add_argument("--contention-degree", type=float, default=0.1)
     parser.add_argument("--skew", type=float, help="hotn: hot-account count (default 100); simple: hot fraction (default 0.00001)")
@@ -122,6 +122,12 @@ def read_metrics(filename, executor):
             raise ValueError("inconsistent OCC counters or final executor errors")
         result.update(attempts=attempts, aborted=aborted,
                       abort_pct=100 * aborted / attempts)
+    if executor == "serial":
+        finalized = metric("serial.txns_processed")
+        attempts = metric("serial.attempts")
+        if (metric("serial.errors") != 0 or metric("serial.validation_failures") != 0
+                or attempts != finalized or finalized != data["transfer_txn_count"]):
+            raise ValueError("inconsistent serial counters or final executor errors")
     return result
 
 
@@ -218,7 +224,7 @@ def execute(args, log, artifacts):
                 log(f"Average attempt abort rate: {summary['average_abort_pct']:.4f}%\n")
                 log(f"Pooled attempt abort rate: {summary['pooled_abort_pct']:.4f}%\n")
             else:
-                log("Average attempt abort rate: N/A (FAFO)\n")
+                log(f"Average attempt abort rate: N/A ({args.executor.upper()})\n")
             log(f"Total CPU utilization: {summary['total_cpu_utilization_pct']:.2f}%\n")
             log(f"Average logical CPUs busy: {summary['average_logical_cpus_busy']:.2f}\n")
             log(f"Total CPU time: {summary['total_cpu_seconds']:.3f} seconds\n")

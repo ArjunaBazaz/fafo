@@ -21,7 +21,7 @@ Its release profile matches the original workspace's release settings.
 
 ## Benchmark adapter
 
-The benchmark selects `--executor fafo|occ` (default `fafo`) and uses this dependency:
+The benchmark selects `--executor fafo|occ|serial` (default `fafo`) and uses this dependency:
 
 ```toml
 fafo-occ = { path = "../occ" }
@@ -54,6 +54,13 @@ selected executor's final `flush`, and keeps FAFO-only framer metrics conditiona
 OCC emits no global metrics and does not change the existing metric recorder.
 Its returned statistics count finalized transactions, attempts, validation
 failures, applied change sets, final errors, and QMDB persistence tasks.
+
+`--executor serial` is a separate benchmark adapter using `workers = 1,
+window = 1`. It executes transactions one at a time in input order, with inline
+persistence submission and unchanged QMDB background processing. It retains
+OCC's read tracking, validation, versioned state and handoff overhead. It is a
+sequential OCC reference, rather than an optimized direct-loop serial executor.
+Serial counters and replay directories are separate from normal OCC and FAFO.
 
 For the usual helper script, run the same command with either executor:
 

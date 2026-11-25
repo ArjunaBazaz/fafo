@@ -53,6 +53,13 @@ else:
             "occ.attempts": {"value": str(100 + aborted)},
             "occ.validation_failures": {"value": str(aborted)},
         })
+    if value("--executor") == "serial":
+        metrics.update({
+            "serial.txns_processed": {"value": "100"},
+            "serial.attempts": {"value": "100"},
+            "serial.validation_failures": {"value": "0"},
+            "serial.errors": {"value": "1" if os.environ.get("FAFO_SERIAL_TEST_ERROR") else "0"},
+        })
     if os.environ.get("FAFO_REPEAT_TEST_MISSING_METRIC"):
         del metrics["bench-sendeth.replay.txns_per_sec"]
     output.write_text(json.dumps({"metrics": metrics, "transfer_txn_count": 100}))
@@ -129,6 +136,20 @@ class RepeatedBenchmarkTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("average_abort_pct", self.summary()["summary"])
         self.assertIn("Average attempt abort rate: N/A (FAFO)", self.output.read_text())
+
+    def test_serial_runs_validate_counts_without_occ_abort_metrics(self):
+        result = self.invoke("serial")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.summary()["executor"], "serial")
+        self.assertEqual(self.summary()["summary"]["average_throughput_tx_per_sec"], 150)
+        self.assertNotIn("average_abort_pct", self.summary()["summary"])
+        self.assertIn("Average attempt abort rate: N/A (SERIAL)", self.output.read_text())
+
+    def test_serial_final_errors_are_not_reported_as_success(self):
+        result = self.invoke("serial", env=dict(os.environ, FAFO_SERIAL_TEST_ERROR="1"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.summary()["runs"], [])
+        self.assertIn("inconsistent serial counters", result.stdout)
 
     def test_default_build_resolves_cargo_target_and_builds_once(self):
         cargo = self.root / "cargo"

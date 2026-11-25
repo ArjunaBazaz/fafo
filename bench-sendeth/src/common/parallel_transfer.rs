@@ -236,6 +236,9 @@ pub fn parallel_transfer(
         super::occ_adapter::SelectedExecutor::Occ(mut pipe) => {
             super::occ_adapter::executor_loop(task_receiver, done_sender, &mut pipe, &pb_exec)
         }
+        super::occ_adapter::SelectedExecutor::Serial(mut pipe) => {
+            super::serial_adapter::executor_loop(task_receiver, done_sender, &mut pipe, &pb_exec)
+        }
     });
 
     // 3. Main loop of benchmark

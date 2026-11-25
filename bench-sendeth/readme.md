@@ -1,5 +1,45 @@
 # bench-sendeth
 
+The serial reference is selected with `--executor serial` in the Rust CLI,
+`run.sh`, `run_benchmarks.py`, or `run_contention_sweep.py`. It uses the existing
+ordered OCC engine with `workers = 1, window = 1`: only one EVM transaction is
+executed at a time, in input order, with no validation retries. QMDB/CodeDB
+configuration, background processing, four-transaction persistence grouping,
+and final drain timing remain unchanged. The calling coordinator and database
+threads still exist, so process CPU utilization may exceed 100%.
+
+This is a sequential OCC reference, retaining read-version tracking, validation,
+the versioned overlay, and worker handoff overhead; it is not an optimized
+direct-loop serial executor. Persistence submission runs inline on the
+coordinator in this one-worker configuration, while QMDB itself stays parallel.
+FAFO and normal OCC settings are unchanged. Serial replay uses `_run_serial`,
+default replay metric files use a `serial_` prefix, and raw counters use
+`serial.*`. Final errors or unexpected retries fail the benchmark. Serial CSV
+reports include throughput/CPU means and sample deviations, without OCC abort
+columns.
+
+After rebuilding the binary, run matching serial medium sweeps on SSD and RAM:
+
+```bash
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+python3 bench-sendeth/run_contention_sweep.py \
+  --binary "$CARGO_TARGET_DIR/release/bench-sendeth" \
+  --executor serial --size medium --skew 10 -n 5 \
+  --db-dir /mnt/ssd/fafo-benchmark-data \
+  --filename "/mnt/ssd/abazaz/results/ssd-serial-medium-skew10-n5-$STAMP.csv"
+
+python3 bench-sendeth/run_ram_contention_sweeps.py \
+  --binary "$CARGO_TARGET_DIR/release/bench-sendeth" \
+  --executor serial --size medium --skew 10 -n 5 \
+  --db-dir /mnt/ssd/fafo-benchmark-data --ram-dir /dev/shm \
+  --filename "/mnt/ssd/abazaz/results/ram-serial-medium-skew10-n5-$STAMP.csv"
+```
+
+Each command covers contention 0.0 through 0.9 and performs 50 measured replays.
+The RAM wrapper now accepts `--executor serial`, `occ`, or `fafo` for a single
+sweep; omitting it retains the original OCC-then-FAFO behavior.
+
 For a metrics-only contention sweep (ETH, hotn), run:
 
 ```bash
@@ -9,7 +49,7 @@ python3 bench-sendeth/run_contention_sweep.py \
   --filename results/occ-medium-sweep.csv
 ```
 
-Select `fafo` or `occ`, and `fast`, `medium`, or `full`. The script builds release
+Select `fafo`, `occ`, or `serial`, and `fast`, `medium`, or `full`. The script builds release
 once unless `--binary /path/to/bench-sendeth` is supplied. It reuses the existing
 runner to initialize a missing reference database, prepare each workload, and
 replay contention levels 0.0 through 0.9 in steps of 0.1. `-n`, `--n`, or `--runs` sets the number
@@ -97,7 +137,7 @@ timing boundaries:
 ./run.sh --size fast --executor fafo
 ```
 
-The Rust CLI also accepts `--executor fafo|occ` with `replay-workload`.
+The Rust CLI also accepts `--executor fafo|occ|serial` with `replay-workload`.
 FAFO retains its original execution loop and metrics. A thin
 [`occ_adapter.rs`](src/common/occ_adapter.rs) calls the isolated OCC executor;
 it uses 100 execution workers, one persistence worker, and the coordinator,
